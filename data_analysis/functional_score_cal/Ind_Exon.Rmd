@@ -22,7 +22,7 @@ params:
     
   Output_dir:
     label: "Output Dir:"
-    value: "###/results/11_2023/Ind_1.5/"
+    value: "/research/bsi/projects/breast/s108235.tripneg_Couch/projects/s108235.tripneg/breast_requests/Predisposition_genes/Chunling/BRCA2/results/11_2023/Ind_1.5/"
     input: text       
   
   loessSubset:
@@ -87,9 +87,9 @@ library(threejs)
 library (ROCR);
 library(pROC)
 
-rdir <- '###BRCA2/rpgm/'
+rdir <- '//research/bsi/projects/breast/s108235.tripneg_Couch/projects/s108235.tripneg/breast_requests/Predisposition_genes/Chunling/BRCA2/rpgm/'
 
-exonDataList <- readr::read_table("###BRCA2/data/exonDataList.txt")
+exonDataList <- readr::read_table("/research/bsi/projects/breast/s108235.tripneg_Couch/projects/s108235.tripneg/breast_requests/Predisposition_genes/Chunling/BRCA2/data/exonDataList.txt")
 Exn <- paste0("E", params$Exon)
 loessSubset <- params$loessSubset
 EventCount_Filter <- params$EventCount_Filter
@@ -177,7 +177,7 @@ We will subset data within the target region as shown below.
 
 ```{r}
 
-target <- read.csv("###BRCA2/data/10_2023_curation//chunling_target.csv")
+target <- read.csv("/research/bsi/projects/breast/s108235.tripneg_Couch/projects/s108235.tripneg/breast_requests/Predisposition_genes/Chunling/BRCA2/data/10_2023_curation//chunling_target.csv")
 
 kable(target[, c("Exon", "Start", "End")])
 ```
@@ -317,7 +317,7 @@ if(length(filenames) >1){ # two experiments
 
 ```{r}
 ## update EvenType using Chunling's latest file
-ET <- read.csv("###BRCA2/data/10_2023_curation/chunling_ET.csv") %>% rename(EventType = ET) %>% select(-uid)
+ET <- read.csv("/research/bsi/projects/breast/s108235.tripneg_Couch/projects/s108235.tripneg/breast_requests/Predisposition_genes/Chunling/BRCA2/data/10_2023_curation/chunling_ET.csv") %>% rename(EventType = ET) %>% select(-uid)
 
 #find the row indices
 row_idx <- match(ET$uPOS, wide$uPOS)
@@ -794,7 +794,7 @@ sliceRs <- wide %>% filter(spliceR == TRUE)
 
 ```{r}
 library(readxl)
-Varaints_to_be_excluded_when_use_MAVE_internal_control_to_build_model <- read_excel("###BRCA2/data/10_2023_curation/Varaints to be excluded when use MAVE internal control to build model.xlsx")
+Varaints_to_be_excluded_when_use_MAVE_internal_control_to_build_model <- read_excel("/research/bsi/projects/breast/s108235.tripneg_Couch/projects/s108235.tripneg/breast_requests/Predisposition_genes/Chunling/BRCA2/data/10_2023_curation/Varaints to be excluded when use MAVE internal control to build model.xlsx")
 
 Varaints_to_be_excluded_when_use_MAVE_internal_control_to_build_model <- Varaints_to_be_excluded_when_use_MAVE_internal_control_to_build_model %>% mutate(uPOS = paste(GRCh38Location-1, REF, ALT, sep = "_") )
                                                                                                                     
@@ -1640,6 +1640,7 @@ if(length(filenames) ==2){
   
   final1$functional.scoreB <- final1$meanR
 
+  temp <- final1 %>% select(R1, R2) 
   temp$R1[which(final1$removeC == TRUE)] <- NA
   temp$R2[which(final1$removeC == TRUE)] <- NA
   
@@ -1659,6 +1660,7 @@ if(length(filenames) == 3){
 
   final1$functional.scoreB <- final1$meanR
   
+  temp <- final1 %>% select(R1, R2, R3) 
   temp$R1[which(final1$removeC1 == TRUE)] <- NA
   temp$R2[which(final1$removeC2 == TRUE)] <- NA
   temp$R3[which(final1$removeC3 == TRUE)] <- NA
@@ -1678,7 +1680,8 @@ if(length(filenames) == 4){
   final1$functional.scoreA <- apply(temp, 1, mean, na.rm = TRUE)
 
   final1$functional.scoreB <- final1$meanR
-  
+ 
+  temp <- final1 %>% select(R1, R2, R3, R4) 
   temp$R1[which(final1$removeC1 == TRUE)] <- NA
   temp$R2[which(final1$removeC2 == TRUE)] <- NA
   temp$R3[which(final1$removeC3 == TRUE)] <- NA
@@ -1974,6 +1977,7 @@ if(length(filenames) ==2){
   
   final2$functional.scoreB <- final2$meanR
 
+  temp <- final2 %>% select(R1, R2)
   temp$R1[which(final2$removeC == TRUE)] <- NA
   temp$R2[which(final2$removeC == TRUE)] <- NA
   
@@ -1993,6 +1997,7 @@ if(length(filenames) == 3){
 
   final2$functional.scoreB <- final2$meanR
   
+  temp <- final2 %>% select(R1, R2, R3) 
   temp$R1[which(final2$removeC1 == TRUE)] <- NA
   temp$R2[which(final2$removeC2 == TRUE)] <- NA
   temp$R3[which(final2$removeC3 == TRUE)] <- NA
@@ -2013,6 +2018,8 @@ if(length(filenames) == 4){
 
   final2$functional.scoreB <- final2$meanR
   
+  temp <- final2 %>% select(R1, R2, R3,R4) 
+
   temp$R1[which(final2$removeC1 == TRUE)] <- NA
   temp$R2[which(final2$removeC2 == TRUE)] <- NA
   temp$R3[which(final2$removeC3 == TRUE)] <- NA
