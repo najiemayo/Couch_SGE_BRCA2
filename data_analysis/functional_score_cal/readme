@@ -1,6 +1,8 @@
-This folder contains the following files that were used for functional score calculation:
+This folder contains the following files that were used for functional score calculation/ probability calculation:
 
-1. Ind_Exon.Rmd
-2. norm_classification_parm.Rmd
-3. KnitReport_github.R
-4. functions.R
+1. functions.R
+2. Ind_Exon.Rmd
+3. norm_classification_parm.Rmd
+4. runIndReport.R
+5. runXreport.R
+
