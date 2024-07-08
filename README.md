@@ -41,7 +41,7 @@ install.packages(c("knitr", "rjags", "R2WinBUGS", "R2jags", "mgcv"))
 This should be done within one miniute.
 
 # Test and Run:
-- To run a demo on a subset of BRCA2 exons:
+- To run a demo on a input file `combined.raw.20.tsv` using ~20% of the variants from the full BRCA2 exons data set:
   - `cd VarCall`
   - Start R by type R in the command line
   - Within R, type the following `library(knitr); knit("BRCA2mave24.ldaER.Rtex")`
