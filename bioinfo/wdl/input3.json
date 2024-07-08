@@ -1,8 +1,0 @@
-{
-  "SeqToAnno.INPUT_VCF": "",
-  "SeqToAnno.SpliceaiScript": "~/bin/spliceai",
-  "SeqToAnno.ReferenceGenome": "~/GRCh38_full_analysis_set_plus_decoy_hla.fa",
-  "SeqToAnno.SpliceaiEnvProfile": "~/config/PKG_PROFILE_SPLICEAI",
-  "SeqToAnno.SpliceaiParseScript": "~/spliceAI_parse.py",
-  "SeqToAnno.SAMPLENAME": "SampleName"
-}
