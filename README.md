@@ -54,12 +54,16 @@ This should be done within one miniute.
   - Within file BRCA2mave24.ldaER.Rtex, change data set name by changing the line `% db<-"uvCounts"` to `% db<-"uvCountsFnl"`, and increase the MCMC iterations by changing 'mcmc.pars<-list(iter=10000, burn=5000, thin=10) to `mcmc.pars<-list(iter=150000, burn=50000, thin=10)`   
   - Start R by type R in the command line
   - Within R, type the following `library(knitr); knit("BRCA2mave24.ldaER.Rtex")`
+
+- Generate the pdf file with code and explanations:
+  - In Linux, type `pdflatex BRCA2mave24.ldaER.tex`.
+  - In Windows, use an installed Tex systeme, such as TexStudio to open `BRCA2mave24.ldaER.tex` and build the pdf file `BRCA2mave24.ldaER.pdf`
     
 - Specified prior:
   - Currently the prior is set to a mean value of 0.2 using a beta distribution Beta(2, 8). The change the prior, modifiy the line `beta.a<-2.0` and `beta.b<-8.0`. 
 
 - Expected output and running time.
-The output files will be `BRCA2mave24.ldaER.tex`, `MAVEpostProbs.csv` and several pdf plots. File `BRCA2mave24.ldaER.tex` and the plots can be further compiled into a pdf file. File `MAVEpostProbs.csv` is the main output file for predicted probabilities of being pathogenic based on the training labels from file `variant_type_for_train.csv`. The following shows the main columns of output:
+The output files will be `BRCA2mave24.ldaER.tex`, `MAVEpostProbs.csv` and several pdf plots. File `BRCA2mave24.ldaER.tex` and the plots can be further compiled into a pdf file `BRCA2mave24.ldaER.pdf` with code, running result and code explanations. File `MAVEpostProbs.csv` is the main output file for predicted probabilities of being pathogenic based on the training labels from file `variant_type_for_train.csv`. The following shows the main columns of output:
   - PrDel: the probability of being pathogenic
   - lPostOdds: the log posterior odds
   - logBF: the log Bayes factor
