@@ -17,8 +17,9 @@ This repository provides the VarCall model tool used in the analysis of high thr
 
 ## Software requirements
 ### OS Requirements
-This package is supported for *Linux*, but in principle should be able to run on all other platforms such as OS X, Windows. The package has been tested on the following systems:
+This package is supported for *Linux*, but in principle should be able to run on all other platforms such as OS X and Windows. The package has been tested on the following systems:
 + Linux: Red Hat Enterprise Linux 8.8
++ Windows: Windows 10 Enterprise
 
 ### R package Dependencies
 `VarCall` mainly depends on the following packages.
