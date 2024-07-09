@@ -65,6 +65,7 @@ The output files will be `BRCA2mave24.ldaER.tex`, `MAVEpostProbs.csv` and severa
   - logBF: the log Bayes factor
   - eta: the estimated effect size
   - eta.ll, eta.ul: 95% lower bound and upper bound of eta
+The running time for the small data set demo takes < one hour. The running time for the full data set takes ~4-6 hours.
 
 # License
 
