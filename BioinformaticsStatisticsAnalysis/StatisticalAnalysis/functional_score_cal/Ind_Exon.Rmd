@@ -1,0 +1,2340 @@
+---
+author: 
+  "Jeanie Na"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+title    : "High throughput study analysis one experiment investigation individual exon report"
+
+
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    theme: united
+    highlight: tango
+
+params:
+
+  Exon:
+    label: "Exon:"
+    value: "21_bs"
+    input: text
+    
+  Output_dir:
+    label: "Output Dir:"
+    value: "./BRCA2/results/02_15_2024/Ind_full/"
+    input: text       
+  
+  loessSubset:
+    label: "Loess Filter (keep):"
+    value: "Synonymous"
+    choices: ["Findlay", "ModFindlay", "ModFindlay2", "NegFindlay", "Synonymous", "allSNV"]
+    input: select
+    
+  EventCount_Filter:
+    label: "EventCount Filter:"
+    value: "libD510"
+    choices: ["lib10", "libD510"]
+    input: select
+  ladjt:
+    label: "Loess Fit:"
+    value: "No"
+    choices: ["Yes", "No"]
+    input: select
+  vset:
+    label: "Variant set:"
+    value: "SNV"
+    choices: ["allv", "SNV"]
+    input: select
+  Gene: 
+    label: "Gene:"
+    value: "BRCA2"
+    choices: ["BRCA2", "PALB2", "RAD51C"]
+    input: select
+  C_fc:
+    value: 1
+  vexclude:
+    label: "variants to be excluded files:"
+    value: "./BRCA2/data/10_2023_curation/Varaints to be excluded when use MAVE internal control to build model.xlsx" 
+    choices: ["./BRCA2/data/10_2023_curation/Varaints to be excluded when use MAVE internal control to build model.xlsx",NULL] 
+    input: select
+  ETfile:
+    label: "EventType update file:"
+    value: "./BRCA2/data/10_2023_curation/chunling_ET.csv"
+    choices: ["./RAD51C/data/RAD51C_E2&3_Event type annotation 012224.xlsx", "./BRCA2/data/10_2023_curation/chunling_ET.csv", NULL] 
+    input: select
+  datalist:
+    label: "Data input file:"
+    value: "./BRCA2/data/exonDataList_030424.txt"
+  targetfile:
+    label: "Data input file:"
+    value: "./BRCA2/data/10_2023_curation//chunling_target.csv"
+    choices: ["./RAD51C/data/chunling_target.csv", "./BRCA2/data/10_2023_curation//chunling_target.csv", NULL] 
+  HDRfile:
+    label: "HDR File:"
+    value: "./BRCA2/data/HDR_exclSPLICEhypo.xlsx"
+    input: select
+---
+
+```{=html}
+<style type="text/css">
+.main-container {
+  max-width: 1200px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+```
+<link rel="stylesheet" type="text/css" href="http://cdn.datatables.net/1.10.5/css/jquery.dataTables.min.css">
+
+```{=html}
+<script type="text/javascript">
+  $(document).ready(function() {
+    $("table").DataTable();
+  } );
+</script>
+```
+
+```{r setup, include=TRUE, warning=FALSE, message=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE)
+library(kableExtra)
+library(plotly)
+library(arsenal)
+require(patchwork)
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(readxl)
+library(tidyverse)
+library(threejs)
+library (ROCR);
+library(pROC)
+library(mixtools)
+
+
+exonDataList <- read.table(params$datalist, sep = "\t", header = T) ##readr::read_table
+Exn <- paste0("E", params$Exon)
+loessSubset <- params$loessSubset
+EventCount_Filter <- params$EventCount_Filter
+vset <- params$vset
+Gene <- params$Gene 
+evc <- ifelse(length(grep("100", EventCount_Filter)), 100, 10)
+C_fc <- params$C_fc
+ladjt <- params$ladjt
+
+filenames <- exonDataList$filenames[which(exonDataList$Gene == params$Gene & exonDataList$Exon == Exn)]
+excludeAApos <- exonDataList$AApos[which(exonDataList$Gene == params$Gene & exonDataList$Exon == Exn)]
+dtdir <- unique(exonDataList$path[which(exonDataList$Gene == Gene& exonDataList$Exon == Exn)])
+```
+
+
+```{r}
+if(!is.null(params$HDRfile)){
+  if (grepl("\\.txt$", params$HDRfile)) {
+    # Read the file using read.table
+    HDR <- read.table(file = params$HDRfile, header = TRUE, sep = '\t')
+  } else {
+    HDR <- read_excel(params$HDRfile)
+  }
+  HDR$htype <- HDR$`HDR function`
+}
+
+```
+
+## Setting of this report
+
+Gene: `r Gene`\ 
+Exon: `r Exn`\
+dtdir: `r  dtdir`\
+filenames: `r filenames`\
+loessSubset:  `r params$loessSubset`\
+EventCount_Filter: `r params$EventCount_Filter`\
+vset: `r vset`\
+Score A and C _foldchange : `r params$C_fc`\
+Varaints_to_be_excluded_when_use_MAVE_internal_control_to_build_model: `r params$vexclude`
+
+## Aim
+
+To propose functional scores to classify variants for `r params$Gene` `r Exn` only. We are looking into `r length(filenames)` experiment(s) in this report.
+
+```{r readin, include=TRUE, warning=FALSE, message=FALSE}
+# read in data
+tests <- list()
+for (i in 1:length(filenames)){
+  
+  # test1 <-read_delim(paste0(dtdir, filenames[i]), 
+  #                                     delim = "\t", escape_double = FALSE, 
+  #                                     trim_ws = TRUE)
+ test1 <-read_tsv(paste0(dtdir, filenames[i]), num_threads = 1)
+ 
+  test1 <- test1 %>% mutate(SpliceAI_DS_AG = round(SpliceAI_DS_AG, 5),
+                           SpliceAI_DS_AL = round(SpliceAI_DS_AL, 5),
+                           SpliceAI_DS_DG = round(SpliceAI_DS_DG, 5),
+                           SpliceAI_DS_DL = round(SpliceAI_DS_DL, 5))
+  
+  test1$sample_id <- paste0("R", i, "_", test1$sample_id)
+  print(unique(test1$sample_id))
+  sns <- unique(test1$sample_id)
+
+  if(length(grep("ssm", tolower(sns)))>0){
+    test1.lib <- sns[grep("ssm", tolower(sns))]
+  }else if (length(grep("lib", tolower(sns)))>0){
+    test1.lib <- sns[grep("lib", tolower(sns))]
+  }
+  
+  test1.D5 <- sns[grep("d5", tolower(sns))]
+  
+  if(length(grep("d14", tolower(sns)))>0){
+    test1.D14 <- sns[grep("d14", tolower(sns))]
+  }else if (length(grep("d20", tolower(sns)))>0){
+    test1.D14 <- sns[grep("d20", tolower(sns))]
+  }
+  
+  
+  test1 <- test1 %>% filter(sample_id %in% c(test1.lib, test1.D5, test1.D14))
+  
+  test1$sample_id[test1$sample_id == test1.lib] <- paste0("R", i, "_lib")
+  test1$sample_id[test1$sample_id == test1.D5] <- paste0("R", i, "_D5")
+  test1$sample_id[test1$sample_id == test1.D14] <- paste0("R", i, "_D14")
+  
+  if(!is.na(excludeAApos[i])){
+    test1 <- test1 %>% arrange(POS) %>% filter(!AApos %in% excludeAApos[i]) ## remove pam site
+  }
+  
+  tests[[i]] <- test1
+}
+
+
+```
+
+## Data
+
+
+`r filenames` was used in this report.
+
+Time points:
+
+Lib, D5,  `r paste0(ifelse(grep('D14', test1.D14), "D14", "D20"), " were used in this analysis")`.
+
+## Target region
+
+We will subset data within the target region as shown below.
+
+```{r}
+
+target <- read.csv(params$targetfile)
+
+kable(target[, c("Exon", "Start", "End")])
+```
+
+## Method
+
+Please refer to the email Chunling sent on 7/20/2022.
+
+A. Within each replicates:
+
+1.  Before Loess:
+
+-- Exclude rows with "NA" in "EventType" column; 
+
+-- Exclude rows with "EventCount" \< `r evc` and " sample_id" = lib column or D5 
+
+-- Calculate the normalized freq. (evenCount/sum(eventCount)) for lib, d5, `r ifelse(grep('D14', test1.D14), "D14", "D20")`
+
+
+2.  Apply Loess position adjustment: 
+
+-- Subset variants according to the filtering `r params$loesssubset`
+
+-- Use the above subset variants to fit loess line then apply to all dataset for loess transformation (use span of 0.15 or to be determined), extend flatly outward to include any positions not fit. In our data, we are not excluding any event type: "UpstreamNoncoding", "PartialCodingAndUpstreamNoncoding" , "PartialCodingUpStream", "StopGain", "Missense", "Synonymous", "DownstreamNonCodingAndPartialCodingDownstream", "DownstreamNonCoding". Note: Findlay may have used different approach.
+
+3.  After Loess transformation
+
+-- Exclude rows with " SpliceAI" (any one of the SpliceAI 4 "DS" columns) \>0.2; 
+
+-- restrict to SNVs (variants with single nt change column ALT and REF: "REF"="A" or "T" or "C" or "G" and ALT ="A" or "T" or "C" or "G")
+
+B. Normalization across replicates 
+
+-- Scores from within each replicate were linearly scaled such that the median synonymous and median nonsense SNVs within the replicate were set to the median synonymous and median nonsense SNV values averaged across replicate experiments.
+
+C. Functional scores
+
+-- Single Experiment report
+-- Multiple Experiments
+
+D. Classification
+
+-- Mixture model.
+
+-- ROC balance of accuracy, ie, max(sens + spec)
+
+E. Output
+
+-- In addition to this report, there will be a csv file output with all the intermediate results. 
+For example, the file name would be like EX19_2E_4lab_cutoff_0_sen0.84_spec0.78_wFS.csv
+
+It is the Exon name + how many Experiments + loess subset + 4lab_cutoff_ + cutoff  + Sensitivity + specificity from ROC.
+
+
+Refer to Findlay's paper for methods.
+
+## Results
+
+### A. Within each replicate D5_lib Loess
+
+```{r}
+## exclude with "NA" in "EventType" column;
+## exclude with "EventCount" <10 and " sample_id" =" E3_pUCSSMmu_lib" or D5
+if(EventCount_Filter %in% c("lib10", "lib100")){
+  for( i in 1:length(filenames)){
+    tests[[i]] <- tests[[i]] %>% mutate(uPOS = paste(POS, REF, ALT, sep = "_")) %>% filter(!is.na(EventType)) %>% filter(!(EventCount < evc & sample_id %in% c(paste0("R", i, "_lib"))))
+  }
+  
+} else {
+    for( i in 1:length(filenames)){
+    tests[[i]] <- tests[[i]] %>% mutate(uPOS = paste(POS, REF, ALT, sep = "_")) %>% filter(!is.na(EventType)) %>% filter(!(EventCount < evc & sample_id %in% c(paste0("R", i, "_lib"), paste0("R", i, "_D5"))))
+    }
+}
+  
+```
+
+After filtering NA for EventType, Event Count < `r evc` for `r EventCount_Filter`, replicate1 has `r length(unique(tests[[1]]$uPOS))` variants. 
+`r ifelse(length(filenames) > 1, paste0("replicate2 has ", length(unique(tests[[2]]$uPOS)), " variants"), "")` 
+`r ifelse(length(filenames) > 2, paste0("replicate3 has ", length(unique(tests[[3]]$uPOS)), " variants"), "")` 
+`r ifelse(length(filenames) > 3, paste0("replicate4 has ", length(unique(tests[[4]]$uPOS)), " variants"), "")` 
+`r ifelse(length(filenames) > 4, paste0("replicate5 has ", length(unique(tests[[5]]$uPOS)), " variants"), "")` 
+
+```{r}
+test <- bind_rows(tests)
+wide <- test %>% arrange(POS) %>% select(-AAEventCount, -AANormalizedEventCount, -NormalizedEventCount)  %>% 
+        spread(sample_id, EventCount)
+      
+colnames(wide) <- make.names(colnames(wide))
+# # one experiments
+wide <- wide %>% mutate(R1_lib_freq = log2(R1_lib/sum(R1_lib, na.rm = T)),
+                              R1_D5_freq = log2(R1_D5/sum(R1_D5, na.rm = T)),
+                              R1_D14_freq = log2(R1_D14/sum(R1_D14, na.rm = T)),
+                              
+                              R1_D5_lib = R1_D5_freq - R1_lib_freq,
+                              R1_D14_lib= R1_D14_freq - R1_lib_freq,
+                              R1_D14_D5 = R1_D14_freq - R1_D5_freq
+                              )%>% arrange(POS)
+    
+if(length(filenames) >1){ # two experiments
+    ### calculate ratio
+    wide <- wide %>% mutate(
+                              R2_lib_freq = log2(R2_lib/sum(R2_lib, na.rm = T)),
+                              R2_D5_freq = log2(R2_D5/sum(R2_D5, na.rm = T)),
+                              R2_D14_freq = log2(R2_D14/sum(R2_D14, na.rm = T)),
+                              
+                              R2_D5_lib = R2_D5_freq - R2_lib_freq,
+                              R2_D14_lib= R2_D14_freq - R2_lib_freq,
+                              R2_D14_D5 = R2_D14_freq - R2_D5_freq
+                              )%>% arrange(POS)
+  } 
+  
+if(length(filenames) >2) {# three experiments
+  ### calculate ratio
+  wide <- wide %>% mutate(R3_lib_freq = log2(R3_lib/sum(R3_lib, na.rm = T)),
+                          R3_D5_freq = log2(R3_D5/sum(R3_D5, na.rm = T)),
+                          R3_D14_freq = log2(R3_D14/sum(R3_D14, na.rm = T)),
+                          
+                          R3_D5_lib = R3_D5_freq - R3_lib_freq,
+                          R3_D14_lib= R3_D14_freq - R3_lib_freq,
+                          R3_D14_D5 = R3_D14_freq - R3_D5_freq
+  )%>% arrange(POS)
+}
+
+if(length(filenames) >3) { # four experiments
+  ### calculate ratio
+  wide <- wide %>% mutate(R4_lib_freq = log2(R4_lib/sum(R4_lib, na.rm = T)),
+                          R4_D5_freq = log2(R4_D5/sum(R4_D5, na.rm = T)),
+                          R4_D14_freq = log2(R4_D14/sum(R4_D14, na.rm = T)),
+                          
+                          R4_D5_lib = R4_D5_freq - R4_lib_freq,
+                          R4_D14_lib= R4_D14_freq - R4_lib_freq,
+                          R4_D14_D5 = R4_D14_freq - R4_D5_freq
+  )%>% arrange(POS)
+}
+if(length(filenames) >4) { # five experiments
+  ### calculate ratio
+  wide <- wide %>% mutate(R5_lib_freq = log2(R5_lib/sum(R5_lib, na.rm = T)),
+                          R5_D5_freq = log2(R5_D5/sum(R5_D5, na.rm = T)),
+                          R5_D14_freq = log2(R5_D14/sum(R5_D14, na.rm = T)),
+                          
+                          R5_D5_lib = R5_D5_freq - R5_lib_freq,
+                          R5_D14_lib= R5_D14_freq - R5_lib_freq,
+                          R5_D14_D5 = R5_D14_freq - R5_D5_freq
+  )%>% arrange(POS)
+}
+if(length(filenames) >5) { # six experiments
+  ### calculate ratio
+  wide <- wide %>% mutate(R6_lib_freq = log2(R6_lib/sum(R6_lib, na.rm = T)),
+                          R6_D5_freq = log2(R6_D5/sum(R6_D5, na.rm = T)),
+                          R6_D14_freq = log2(R6_D14/sum(R6_D14, na.rm = T)),
+                          
+                          R6_D5_lib = R6_D5_freq - R6_lib_freq,
+                          R6_D14_lib= R6_D14_freq - R6_lib_freq,
+                          R6_D14_D5 = R6_D14_freq - R6_D5_freq
+  )%>% arrange(POS)
+}
+```
+
+
+
+```{r}
+## update EvenType using Chunling's latest file
+if(!is.null(params$ETfile)){
+  ## eventType to update
+  if (grepl("\\.csv$", params$ETfile)) {
+  # Read the file using read.table
+    ET <- read.table(file = params$ETfile, header = TRUE, sep = ',')
+  } else {
+    ET <- read_excel(params$ETfile)
+  }
+  ## change the EventType "Splice -1" to "Splice" for RAD51C only
+  if(Gene == "RAD51C"){
+    ET$EventType <- gsub("Splice.*", "Splice", ET$EventType)
+    ET$EventType <- gsub("Stop gain*", "StopGain", ET$EventType)
+  
+  }
+  if("ET" %in% colnames(ET)){
+    ET <- ET  %>% rename(EventType = ET) %>% mutate(uid = POS, Exon = Exn) %>% dplyr::select(-uid, -Exon) %>%
+    mutate(uPOS =  paste(POS, REF, ALT, sep = "_"))## to be consistent with brca2 input
+  }else{
+    ET <- ET %>% mutate(uid = POS, Exon = Exn) %>% dplyr::select(-uid, -Exon) %>%
+    mutate(uPOS =  paste(POS, REF, ALT, sep = "_"))## to be consistent with brca2 input
+  
+  }
+  #find the row indices
+  row_idx <- match(ET$uPOS, wide$uPOS)
+  ET$AApos     <- as.numeric(ET$AApos)
+  wide$AApos     <- as.numeric(wide$AApos)
+  #replace the values
+  wide[row_idx[-which(is.na(row_idx))], names(ET)] <- as.data.frame(ET[-which(is.na(row_idx)),])
+}
+unique(wide$EventType)
+
+```
+
+After merging all `r length(filenames)` files, we have total `r nrow(wide)` variants.
+
+
+Before loess, plot the D5_lib, D14_lib and D14_D5 ratio, dashed lines are log2(0.5) and log2(0.8) that were used in Findlay.
+
+```{r b4loess, include=TRUE, fig.width=10, fig.height= 8*length(filenames) }
+par(mfrow = c(3, 1))
+
+etype <- c("UpstreamNoncoding", "PartialCodingAndUpstreamNoncoding",  "PartialCodingUpStream", "StopGain", "Missense", "Synonymous", "DownstreamNonCodingAndPartialCodingDownstream", "DownstreamNonCoding", "PartialCodingDownStream", "Intron", "Splice")
+mycol <- c(1, 5, 6, 2, 3, 4, 7, 8, 9, 15, 16)
+names(mycol) <- etype
+temp <- mycol[match(wide$EventType, etype)]
+
+for (i in 1:length(filenames)){
+  Ri_D5_lib <- paste0("R", i, "_D5_lib")
+  Ri_D14_lib <- paste0("R", i, "_D14_lib")
+  Ri_D14_D5 <- paste0("R", i, "_D14_D5")
+  
+  plot(y=unlist(wide[, c(Ri_D5_lib)]), x=wide$POS, type="p", pch = 20, main=paste0(Exn, " R", i), xlab="Position", ylab="D5_lib_ratio (log2)", col = temp)
+  abline(h = log2(1), lty = 3)
+  abline(h = log2(0.5), lty = 2)
+  
+  plot(y = unlist(wide[, Ri_D14_lib]), x=wide$POS, type="p", pch = 20, main=paste0(Exn, " R",i), xlab="Position", ylab="D14_lib_ratio (log2)", col = temp)
+  abline(h = log2(1), lty = 3)
+  abline(h = log2(0.8), lty = 2)
+  
+  plot(y = unlist(wide[, Ri_D14_D5]), x=wide$POS, type="p", pch = 20, main=paste0(Exn, " R",i), xlab="Position", ylab="D14_D5_ratio (log2)", col = temp)
+  abline(h = log2(1), lty = 3)
+  abline(h = log2(0.8), lty = 2)
+}
+
+```
+
+
+Applying loess, plot D5vLib using variants used for loess fit, D5vLib with loess fit, D14vLib with loess; plot D14vD5 using variants used for loess fit, D14vD5 with loess.
+
+```{r loess, include=TRUE, fig.width=10, fig.height= 12*length(filenames) }
+ ##c(length(filenames), 1))
+sspan <- 0.15
+
+lv.n1 <- NULL ## number of variants used for loess of D5vLib
+lv.n2 <- NULL ## number of variants used for loess of D14vD5
+
+for (i in 1:length(filenames)){
+  par(mfrow = c(5, 1)) ## change heeere
+  Ri_D5_lib <- paste0("R", i, "_D5_lib")
+  Ri_D14_lib <- paste0("R", i, "_D14_lib")
+  Ri_D14_D5 <- paste0("R", i, "_D14_D5")
+  D5_lib_loess_Ri <- paste0("D5_lib_loess_R", i)
+  D14_lib_ratio_adjusted_Ri <- paste0("D14_lib_ratio_adjusted_R", i)
+  D14_D5_loess_Ri <- paste0("D14_D5_loess_R", i)
+  D14_D5_ratio_adjusted_Ri <- paste0("D14_D5_ratio_adjusted_R", i)
+
+  
+  if(loessSubset == "Findlay"){
+    test1 <- wide %>% filter(!!sym(Ri_D5_lib) > log2(0.5) & !!sym(Ri_D14_D5) > log2(0.8))
+  } else if(loessSubset == "ModFindlay"){
+    test1 <- wide %>% filter(!(!!sym(Ri_D5_lib) < log2(0.5) & !!sym(Ri_D14_D5) < log2(0.8)))
+  } else if(loessSubset == "NegFindlay"){
+    test1 <- wide %>% filter(!(!!sym(Ri_D5_lib) > log2(0.5) & !!sym(Ri_D14_D5) > log2(0.8)))
+  }else if(loessSubset == "ModFindlay2"){
+    test1 <- wide %>% filter(!!sym(Ri_D14_D5) > log2(0.8))
+  }else if(loessSubset == "Synonymous"){
+    test1 <- wide %>% filter(EventType == "Synonymous")
+  }else{ ## all
+    test1 <- wide
+  }
+  
+  if(vset == "SNV"){
+    test1 <- test1 %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G") )
+  }
+  
+  ############# loess adjusted for D14vlib
+  
+  test1 <- test1 %>% mutate(R = !!sym(Ri_D5_lib))
+  lv.n1 <- c(lv.n1, sum(!is.na(test1[, Ri_D5_lib]))) ## number of variants used for loess of D5vLib
+
+  loess15.1 <- loess(R ~ POS, data=test1, span=sspan)
+  
+  # get smoothed output
+  smoothed15 <- predict(loess15.1, data.frame(POS = wide$POS), se = TRUE)
+  frontendNA <- rearendNA <- NULL
+  frontendNA <- which(is.na(smoothed15$fit) & as.numeric(names(smoothed15$fit)) < 1/2*nrow(wide))
+  if(length(frontendNA)){
+    smoothed15$fit[frontendNA] <- smoothed15$fit[max(frontendNA)+1]
+  }
+  rearendNA <- which(is.na(smoothed15$fit) & as.numeric(names(smoothed15$fit)) > 1/2*nrow(wide))
+  if(length(rearendNA)){
+    smoothed15$fit[rearendNA] <- smoothed15$fit[min(rearendNA)-1]
+  }
+  ## plot D5vlib with variant used for loess with loess
+  temp <- mycol[match(test1$EventType, etype)]
+  plot(test1$R, x=test1$POS, type="p", pch = 20, main=paste0(Exn," ", sum(!is.na(test1[, Ri_D5_lib])),  " variants used for loess R", i), xlab="Position", ylab="D5_lib_ratio (log2)", col = temp)
+  smoothed15.0 <- predict(loess15.1, data.frame(POS = test1$POS), se = TRUE)
+
+  lines(smoothed15.0$fit, x=test1$POS, col="red")
+  abline(h = log2(0.5), lty = 2)
+  abline(h = log2(1), lty = 3)
+  
+  wide <- wide %>% mutate(!!sym(D5_lib_loess_Ri) := smoothed15$fit)
+  
+  ## plot D5vlib with all variants with loess
+  temp <- mycol[match(wide$EventType, etype)]
+  plot(y=unlist(wide[, c(Ri_D5_lib)]), x=wide$POS, type="p", pch = 20, main=paste0(Exn, " R", i), xlab="Position", ylab="D5_lib_ratio (log2)", col = temp)
+  lines(y = unlist(wide[, D5_lib_loess_Ri]), x=wide$POS, col="red")
+  abline(h = log2(0.5), lty = 2)
+  abline(h = log2(1), lty = 3)
+  
+  ## plot D14vlib with loess
+  plot(y = unlist(wide[, Ri_D14_lib]), x=wide$POS, type="p", pch = 20, main=paste0(Exn, " R",i), xlab="Position", ylab="D14_lib_ratio (log2)", col = temp)
+  lines(y = unlist(wide[, D5_lib_loess_Ri]), x=wide$POS, col="red")
+  abline(h = log2(0.8), lty = 2)
+  abline(h = log2(1), lty = 3)
+  ## create D14vlib adjusted
+  
+  wide <- wide %>% mutate(!!sym(D14_lib_ratio_adjusted_Ri) := !!sym(Ri_D14_lib)- !!sym(D5_lib_loess_Ri))
+  
+  ################# loess for D14vD5
+    
+  test1 <- test1 %>% mutate(R = !!sym(Ri_D14_D5))
+    
+  lv.n2 <- c(lv.n2, sum(!is.na(test1[, Ri_D14_D5])))
+    
+  loess15.1 <- loess(R ~ POS, data=test1, span=sspan)
+  
+  smoothed15.0 <- predict(loess15.1, data.frame(POS = test1$POS), se = TRUE)
+  
+  ## plot D14vD5 on variants used for loess with loess
+  temp <- mycol[match(test1$EventType, etype)]
+  plot(test1$R, x=test1$POS, type="p", pch = 20, main=paste0(Exn, " ", sum(!is.na(test1[, Ri_D14_D5])), " variants used for loess R", i), xlab="Position", ylab="D14_D5_ratio (log2)", col = temp)
+  lines(smoothed15.0$fit, x=test1$POS, col="red")
+  abline(h = log2(0.8), lty = 2)
+  abline(h = log2(1), lty = 3)
+  # get smoothed output
+  smoothed15 <- predict(loess15.1, data.frame(POS = wide$POS), se = TRUE)
+  frontendNA <- rearendNA <- NULL
+  frontendNA <- which(is.na(smoothed15$fit) & as.numeric(names(smoothed15$fit)) < 1/2*nrow(wide))
+  if(length(frontendNA)){
+    smoothed15$fit[frontendNA] <- smoothed15$fit[max(frontendNA)+1]
+  }
+  rearendNA <- which(is.na(smoothed15$fit) & as.numeric(names(smoothed15$fit)) > 1/2*nrow(wide))
+  if(length(rearendNA)){
+    smoothed15$fit[rearendNA] <- smoothed15$fit[min(rearendNA)-1]
+  }
+  
+  wide <- wide %>% mutate(!!sym(D14_D5_loess_Ri) := smoothed15$fit)
+  
+  wide <- wide %>% mutate(!!sym(D14_D5_ratio_adjusted_Ri) := !!sym(Ri_D14_D5)- !!sym(D14_D5_loess_Ri))
+  
+  ## plot D14vD5 on all variants with loess
+  temp <- mycol[match(wide$EventType, etype)]
+  plot(y = unlist(wide[, Ri_D14_D5]), x=wide$POS, type="p", pch = 20, main=paste0(Exn, " R",i), xlab="Position", ylab="D14_D5_ratio (log2)", col = temp)
+  lines(y = unlist(wide[, D14_D5_loess_Ri]), x=wide$POS, col="red")
+  abline(h = log2(0.8), lty = 2)
+  abline(h = log2(1), lty = 3)
+}
+
+```
+
+D14vLib:
+
+After subsetting, replicate1 has `r lv.n1[1]` variants used for LOESS fitting then applied back to all the position in the previous data to get fitted D5 values for each variant. 
+
+
+`r ifelse(length(filenames) >1, paste0("After subsetting , replicate2 has ", lv.n1[2], " variants used for LOESS fitting then applied back to all the position in the previous data to get fitted D5 values for each variant."), "") `
+
+
+`r ifelse(length(filenames) >2, paste0("After subsetting , replicate3 has ", lv.n1[3], " variants used for LOESS fitting then applied back to all the position in the previous data to get fitted D5 values for each variant."), "") `
+
+
+`r ifelse(length(filenames) >3, paste0("After subsetting , replicate4 has ", lv.n1[4], " variants used for LOESS fitting then applied back to all the position in the previous data to get fitted D5 values for each variant."), "") `
+
+`r ifelse(length(filenames) >4, paste0("After subsetting , replicate4 has ", lv.n1[5], " variants used for LOESS fitting then applied back to all the position in the previous data to get fitted D5 values for each variant."), "") `
+
+D14vD5:
+
+After subsetting, replicate1 has `r lv.n2[1]` variants used for LOESS fitting then applied back to all the position in the previous data to get fitted D14vD5 values for each variant. 
+
+
+`r ifelse(length(filenames) >1, paste0("After subsetting , replicate2 has ", lv.n2[2], " variants used for LOESS fitting then applied back to all the position in the previous data to get fitted D14vD5 values for each variant."), "") `
+
+
+`r ifelse(length(filenames) >2, paste0("After subsetting , replicate3 has ", lv.n2[3], " variants used for LOESS fitting then applied back to all the position in the previous data to get fitted D14vD5 values for each variant."), "") `
+
+
+`r ifelse(length(filenames) >3, paste0("After subsetting , replicate4 has ", lv.n2[4], " variants used for LOESS fitting then applied back to all the position in the previous data to get fitted D14vD5 values for each variant."), "") `
+
+`r ifelse(length(filenames) >4, paste0("After subsetting , replicate5 has ", lv.n2[4], " variants used for LOESS fitting then applied back to all the position in the previous data to get fitted D14vD5 values for each variant."), "") `
+
+
+#### Position adjustment
+
+Check D5_lib fitting.
+
+
+```{r adjustment, include=TRUE, fig.width=10, fig.height= 8*length(filenames) }
+
+for (i in 1:length(filenames)){
+  par(mfrow = c(2, 1))
+  Ri_D5_lib <- paste0("R", i, "_D5_lib")
+  Ri_D14_lib <- paste0("R", i, "_D14_lib")
+  Ri_D14_D5 <- paste0("R", i, "_D14_D5")
+  D5_lib_loess_Ri <- paste0("D5_lib_loess_R", i)
+  D14_lib_ratio_adjusted_Ri <- paste0("D14_lib_ratio_adjusted_R", i)
+  D14_D5_loess_Ri <- paste0("D14_D5_loess_R", i)
+  D14_D5_ratio_adjusted_Ri <- paste0("D14_D5_ratio_adjusted_R", i)
+
+  ## plot D5vlib with all variants with loess
+  temp <- mycol[match(wide$EventType, etype)]
+  plot(y=unlist(wide[, c(Ri_D5_lib)]), x=wide$POS, type="p", pch = 20, main=paste0(Exn, " R", i), xlab="Position", ylab="D5_lib_ratio (log2) before", col = temp)
+  lines(y = unlist(wide[, D5_lib_loess_Ri]), x=wide$POS, col="red")
+  abline(h = log2(0.5), lty = 2)
+  abline(h = log2(1), lty = 3)
+  
+  ## plot D5vlib difference with loess
+  plot(y=unlist(wide[, c(Ri_D5_lib)])-unlist(wide[, c(D5_lib_loess_Ri)]), x=wide$POS, type="p", pch = 20, main=paste0(Exn, " R", i), xlab="Position", ylab="D5_lib_ratio (log2) after", col = temp)
+  abline(h = log2(0.5), lty = 2)
+  abline(h = log2(1), lty = 3)
+  
+#   lgcol <- unique(temp)
+# lgnm <- names(lgcol)
+# legend(x = "bottom",
+#        inset = -0.15, 
+#        legend = etype,
+#        pch =20,
+#        col =lgcol,
+#        xpd = TRUE, 
+#        cex = 1, ncol = 3) # Horizontal legend
+
+}
+
+```
+
+
+D14_lib ratio position adjustment
+
+```{r adjustment2, include=TRUE, fig.width=10, fig.height= 8*length(filenames) }
+
+for (i in 1:length(filenames)){
+  par(mfrow = c(2, 1))
+  Ri_D5_lib <- paste0("R", i, "_D5_lib")
+  Ri_D14_lib <- paste0("R", i, "_D14_lib")
+  Ri_D14_D5 <- paste0("R", i, "_D14_D5")
+  D5_lib_loess_Ri <- paste0("D5_lib_loess_R", i)
+  D14_lib_ratio_adjusted_Ri <- paste0("D14_lib_ratio_adjusted_R", i)
+  D14_D5_loess_Ri <- paste0("D14_D5_loess_R", i)
+  D14_D5_ratio_adjusted_Ri <- paste0("D14_D5_ratio_adjusted_R", i)
+  
+  ## plot D14vlib with all variants with loess
+  temp <- mycol[match(wide$EventType, etype)]
+  plot(y=unlist(wide[, c(Ri_D14_lib)]), x=wide$POS, type="p", pch = 20, main=paste0(Exn, " R", i), xlab="Position", ylab="D14_lib_ratio (log2) before", col = temp)
+  lines(y = unlist(wide[, D5_lib_loess_Ri]), x=wide$POS, col="red")
+  abline(h = log2(0.5), lty = 2)
+  abline(h = log2(1), lty = 3)
+    
+  ## plot D14vlib adjusted
+  plot(y=unlist(wide[, D14_lib_ratio_adjusted_Ri]), x=wide$POS, type="p", pch = 20, main=paste0(Exn, " R", i), xlab="Position", ylab="D14_lib_ratio (log2) after", col = temp)
+  abline(h = log2(0.5), lty = 2)
+  abline(h = log2(1), lty = 3)
+    
+#   lgcol <- unique(temp)
+# lgnm <- names(lgcol)
+# legend(x = "bottom",
+#        inset = -0.15,
+#        legend = etype,
+#        pch =20,
+#        col =lgcol,
+#        xpd = TRUE,
+#        cex = 1, ncol = 3) # Horizontal legend
+# 
+ }
+
+```
+
+
+D14_D5 ratio position adjustment
+
+```{r adjustment3, include=TRUE, fig.width=10, fig.height= 8*length(filenames) }
+
+for (i in 1:length(filenames)){
+  par(mfrow = c(2, 1))
+  Ri_D5_lib <- paste0("R", i, "_D5_lib")
+  Ri_D14_lib <- paste0("R", i, "_D14_lib")
+  Ri_D14_D5 <- paste0("R", i, "_D14_D5")
+  D5_lib_loess_Ri <- paste0("D5_lib_loess_R", i)
+  D14_lib_ratio_adjusted_Ri <- paste0("D14_lib_ratio_adjusted_R", i)
+  D14_D5_loess_Ri <- paste0("D14_D5_loess_R", i)
+  D14_D5_ratio_adjusted_Ri <- paste0("D14_D5_ratio_adjusted_R", i)
+  
+  ## plot D14vlib with all variants with loess
+  temp <- mycol[match(wide$EventType, etype)]
+  plot(y=unlist(wide[, c(Ri_D14_D5)]), x=wide$POS, type="p", pch = 20, main=paste0(Exn, " R", i), xlab="Position", ylab="D14_D5_ratio (log2) before", col = temp)
+  lines(y = unlist(wide[, D14_D5_loess_Ri]), x=wide$POS, col="red")
+  abline(h = log2(0.5), lty = 2)
+    abline(h = log2(1), lty = 3)
+    
+  ## plot D14vlib adjusted
+  plot(y=unlist(wide[, D14_D5_ratio_adjusted_Ri]), x=wide$POS, type="p", pch = 20, main=paste0(Exn, " R", i), xlab="Position", ylab="D14_D5_ratio (log2) after", col = temp)
+  abline(h = log2(0.5), lty = 2)
+    abline(h = log2(1), lty = 3)
+#     
+#   lgcol <- unique(temp)
+# lgnm <- names(lgcol)
+# legend(x = "bottom",
+#        inset = -0.15,
+#        legend = etype,
+#        pch =20,
+#        col =lgcol,
+#        xpd = TRUE,
+#        cex = 1, ncol = 3) # Horizontal legend
+
+}
+
+```
+
+
+```{r}
+
+# After Loess and position normalization:
+# --exclude with " SpliceAI" (any one of the SpliceAI 4 columns) >0.2;
+# --restrict to variants with single nt change (filter by column "REF"="A" or "T" or "C" or "G")
+##  mutate(splice = rowSums(select(., 8:11) > 0.2)>0) %>% filter(splice == FALSE) %>% arrange(position)
+wide <- wide %>% mutate(spliceR = rowSums(select(., 16:19) > 0.2, na.rm = TRUE)>0)
+wide <- wide %>% filter(POS <= target[target$Exon == Exn, "End"] & POS >= target[target$Exon == Exn, "Start"])
+
+wide2 <- wide %>% filter(spliceR == FALSE) %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G") ) ## SNV no splice, this is to use as model building or normalization, also subset to target region only
+
+sliceRs <- wide %>% filter(spliceR == TRUE)
+
+```
+
+
+```{r}
+if(!is.null(params$vexclude)){
+  Varaints_to_be_excluded_when_use_MAVE_internal_control_to_build_model <- read_excel(params$vexclude)
+
+  Varaints_to_be_excluded_when_use_MAVE_internal_control_to_build_model <- Varaints_to_be_excluded_when_use_MAVE_internal_control_to_build_model %>% mutate(uPOS = paste(GRCh38Location-1, REF, ALT, sep = "_") )
+  wide2 <- wide2 %>% filter(!wide2$uPOS %in% Varaints_to_be_excluded_when_use_MAVE_internal_control_to_build_model$uPOS)    
+
+}
+                    
+```
+
+
+### B. Within Exon Normalization 
+
+From Findlay paper, "Scores from within each replicate were linearly scaled such that the median synonymous and median nonsense SNVs within the replicate were set to the median synonymous and median nonsense SNV values averaged across replicate experiments.
+
+We follow the same approach.
+
+Within each replicate, scores were linearly scaled such that the median synonymous and median stopgain SNVs within the replicate were set to the median synonymous and median stopgain SNV values averaged across replicate experiments.
+
+Note: Here we exclude with " SpliceAI" (any one of the SpliceAI 4 columns) >0.2; SNV only
+
+After removing Splice variants, variants size decreased from `r length(unique(wide$uPOS))` to `r length(unique(wide2$uPOS))`. We use this subset to get the median of StopGain and Synonymous within replicate and across replicates. Then normalize on all the variants.
+
+NOTE::: single experiment, there will be no change after normalization due to the nature of the scaling.
+
+
+#### D14vlib
+
+```{r D14vLib_normalize, include=TRUE, fig.width= length(filenames)*4, fig.height=5}
+Syn.med.14vlib <- StopGain.med.14vlib <- NULL
+
+for (i in 1:length(filenames)){
+  D14_lib_ratio_adjusted_Ri <- paste0("D14_lib_ratio_adjusted_R", i)
+  Syn.med.14vlib <- c(Syn.med.14vlib, median(unlist(wide2[which(wide2$EventType == "Synonymous"), D14_lib_ratio_adjusted_Ri]), na.rm = T))
+  StopGain.med.14vlib <- c(StopGain.med.14vlib,  median(unlist(wide2[which(wide2$EventType == "StopGain"), D14_lib_ratio_adjusted_Ri]), na.rm = T))
+}
+
+
+Syn.Avg.med.14vlib  <- mean(Syn.med.14vlib, na.rm = T) 
+StopGain.Avg.med.14vlib  <- mean(StopGain.med.14vlib, na.rm = T)
+
+scale <- function(x, i){
+  a <- (Syn.Avg.med.14vlib -StopGain.Avg.med.14vlib )/(Syn.med.14vlib[i]-StopGain.med.14vlib[i])
+  b  <- Syn.Avg.med.14vlib  - a*Syn.med.14vlib[i]
+  x2 <- a*x +b
+  return(x2)
+}
+
+etype <- unique(wide$EventType)
+mycol2 <- mycol[etype]
+
+par(mfrow=c(1, length(filenames)))
+for (i in 1:length(filenames)){
+  D14_lib_ratio_adjusted_Ri <- paste0("D14_lib_ratio_adjusted_R", i)
+  D14_lib_ratio_adjusted_Ri.1 <- paste0("D14_lib_ratio_adjusted_R",i,".1")
+  wide <- wide %>% mutate(!!sym(D14_lib_ratio_adjusted_Ri.1) := scale(!!sym(D14_lib_ratio_adjusted_Ri), i))
+  
+  plot(unlist(wide[, D14_lib_ratio_adjusted_Ri]), unlist(wide[,D14_lib_ratio_adjusted_Ri.1]), xlab = "D14_lib_ratio_adjusted", ylab = "D14_lib_ratio_adjusted.1",
+       pch = 20, col = mycol2[match(wide$EventType, etype)], main = paste0("R", i, "Normalization"))
+  abline(v = c(Syn.med.14vlib[i],StopGain.med.14vlib[i]), col = c(3, 2))
+  abline(h = c(Syn.Avg.med.14vlib,StopGain.Avg.med.14vlib), col = c(3, 2))
+  
+  abline(a=0, b=1)
+}
+
+legend(par('usr')[2], par('usr')[4], ##"bottomright",
+       legend = etype,
+       pch =20,
+       col =mycol2,
+       cex = 1, ncol = 1) # Horizontal legend
+```
+
+Check each experiment
+
+```{r D14vLib_normalize2, include=TRUE, fig.width=10, fig.height=16}
+for (i in 1:length(filenames)){
+  par(mfrow=c(4,1))
+
+  plot(wide$POS, unlist(wide[, paste0("R", i, "_D5_lib")]), col = mycol2[match(wide$EventType, etype)], pch = 20, main = paste0("R", i, " Before Normalization"), xlab = "POS", ylab = "D5_lib_ratio original")
+  abline(h = Syn.med.14vlib[i], col = 3, main = paste0("R", "i", "_D5_lib ratio"))
+  abline(h = StopGain.med.14vlib[i], col = 2)
+    abline(h = log2(1), lty = 3)
+    
+  plot(wide$POS, unlist(wide[, paste0("R", i, "_D14_lib")]), col = mycol2[match(wide$EventType, etype)], pch = 20, main =  paste0("R", i, "Before Normalization"), xlab = "POS", ylab = "D14_lib_ratio original")
+  abline(h = Syn.med.14vlib[i], col = 3, main = paste0("R", i, " D14_lib ratio"))
+  abline(h = StopGain.med.14vlib[i], col = 2)
+    abline(h = log2(1), lty = 3)
+  
+  plot(wide$POS, unlist(wide[, paste0("D14_lib_ratio_adjusted_R", i)]), col = mycol2[match(wide$EventType, etype)], pch = 20, main = paste0("R", i, " Before Normalization"), xlab = "POS", ylab = "D14_lib_ratio_adjusted")
+  abline(h = Syn.med.14vlib[i], col = 3, main =  paste0("R", i, " position adjusted D14_lib ratio"))
+  abline(h = StopGain.med.14vlib[i], col = 2)
+    abline(h = log2(1), lty = 3)
+    
+  plot(wide$POS, unlist(wide[, paste0("D14_lib_ratio_adjusted_R", i, ".1")]), col = mycol2[match(wide$EventType, etype)], pch = 20, main = paste0("R", i, " After Normalization"), xlab = "POS", ylab = "D14_lib_ratio_adjusted_normalized")
+  abline(h = Syn.Avg.med.14vlib, col = 3)
+  abline(h = StopGain.Avg.med.14vlib, col = 2)
+    abline(h = log2(1), lty = 3)
+    
+  legend(x = "bottom",
+         inset = -0.15,
+         legend = etype,
+         pch =20,
+         col =mycol2,
+         xpd = TRUE,
+         cex = 1, ncol = 3) # Horizontal legend
+
+}
+
+
+```
+
+
+#### D14vD5
+
+If loess fit is requested, we normalize on the adjusted value, else we normalize on the raw D14vD5 ratio.
+
+```{r D14vD5_normalize, include=TRUE, fig.width= length(filenames)*4, fig.height=5}
+Syn.med.14v5 <- StopGain.med.14v5 <- NULL
+
+for (i in 1:length(filenames)){
+  D14_D5_ratio_adjusted_Ri <- paste0("D14_D5_ratio_adjusted_R", i)
+  Ri_D14_D5 <- paste0("R", i, "_D14_D5")
+  
+  if(ladjt == "No"){
+     wide <- wide %>% mutate(!!sym(D14_D5_ratio_adjusted_Ri) := !!sym(Ri_D14_D5))
+     wide2 <- wide2 %>% mutate(!!sym(D14_D5_ratio_adjusted_Ri) := !!sym(Ri_D14_D5))
+  }
+  
+  Syn.med.14v5 <- c(Syn.med.14v5, median(unlist(wide2[which(wide2$EventType == "Synonymous"), D14_D5_ratio_adjusted_Ri]), na.rm = T))
+  StopGain.med.14v5 <- c(StopGain.med.14v5,  median(unlist(wide2[which(wide2$EventType == "StopGain"), D14_D5_ratio_adjusted_Ri]), na.rm = T))
+}
+
+
+Syn.Avg.med.14v5  <- mean(Syn.med.14v5, na.rm = T) 
+StopGain.Avg.med.14v5  <- mean(StopGain.med.14v5, na.rm = T)
+
+scale2 <- function(x, i){
+  a <- (Syn.Avg.med.14v5 -StopGain.Avg.med.14v5 )/(Syn.med.14v5[i]-StopGain.med.14v5[i])
+  b  <- Syn.Avg.med.14v5  - a*Syn.med.14v5[i]
+  x2 <- a*x +b
+  return(x2)
+}
+
+etype <- unique(wide$EventType)
+mycol2 <- mycol[etype]
+
+par(mfrow=c(1, length(filenames)))
+for (i in 1:length(filenames)){
+  D14_D5_ratio_adjusted_Ri <- paste0("D14_D5_ratio_adjusted_R", i)
+  D14_D5_ratio_adjusted_Ri.1 <- paste0("D14_D5_ratio_adjusted_R",i,".1")
+  wide <- wide %>% mutate(!!sym(D14_D5_ratio_adjusted_Ri.1) := scale2(!!sym(D14_D5_ratio_adjusted_Ri), i))
+  
+  plot(unlist(wide[, D14_D5_ratio_adjusted_Ri]), unlist(wide[,D14_D5_ratio_adjusted_Ri.1]), xlab = "D14_D5_ratio_adjusted", ylab = "D14_D5_ratio_adjusted.1",
+       pch = 20, col = mycol2[match(wide$EventType, etype)], main = paste0("R", i, " Normalization"))
+  abline(v = c(Syn.med.14v5[i],StopGain.med.14v5[i]), col = c(3, 2))
+  abline(h = c(Syn.Avg.med.14v5,StopGain.Avg.med.14v5), col = c(3, 2))
+  abline(a=0, b=1)
+}
+
+legend(par('usr')[2], par('usr')[4], ##"bottomright",
+       legend = etype,
+       pch =20,
+       col =mycol2,
+       cex = 1, ncol = 1) # Horizontal legend
+```
+
+Check each experiment, here
+
+```{r D14vD5_normalize2, include=TRUE, fig.width=10, fig.height=8*length(filenames)}
+for (i in 1:length(filenames)){
+  par(mfrow=c(3,1))
+
+  plot(wide$POS, unlist(wide[, paste0("R", i, "_D14_D5")]), col = mycol2[match(wide$EventType, etype)], pch = 20, main = paste0("R", i, " Before Normalization"), xlab = "POS", ylab = "D14_D5_ratio original")
+  abline(h = Syn.med.14v5[i], col = 3, main = paste0("R", "i", "_D14_D5 ratio"))
+  abline(h = StopGain.med.14v5[i], col = 2)
+    abline(h = log2(1), lty = 3)
+  
+  plot(wide$POS, unlist(wide[, paste0("D14_D5_ratio_adjusted_R", i)]), col = mycol2[match(wide$EventType, etype)], pch = 20, main = paste0("R", i, " Before Normalization"), xlab = "POS", ylab = "D14_D5_ratio_adjusted")
+  abline(h = Syn.med.14v5[i], col = 3, main =  paste0("R", i, " position adjusted D14_lib ratio"))
+  abline(h = StopGain.med.14v5[i], col = 2)
+    abline(h = log2(1), lty = 3)
+    
+  plot(wide$POS, unlist(wide[, paste0("D14_D5_ratio_adjusted_R", i, ".1")]), col = mycol2[match(wide$EventType, etype)], pch = 20, main = paste0("R", i, " After Normalization"), xlab = "POS", ylab = "D14_D5_ratio_adjusted.1_normalized")
+  abline(h = Syn.Avg.med.14v5, col = 3)
+  abline(h = StopGain.Avg.med.14v5, col = 2)
+    abline(h = log2(1), lty = 3)
+  # legend(x = "bottom",
+  #        inset = -0.15,
+  #        legend = etype,
+  #        pch =20,
+  #        col =mycol2,
+  #        xpd = TRUE,
+  #        cex = 1, ncol = 3) # Horizontal legend
+
+}
+
+
+```
+
+
+### C. Pre-Functional Scores
+
+So called Pre-Functional scores is individual experiment scores later in the output noted as R1, R2, R3. They are pulled together to check overall distribution separation of the stopGain vs Synonymous. Also used later for ROC and mixture model checking for pre-classification use (removeA1, removeA2, removeA3, removeA4), which in turn inform the later calculation of the final functional score.
+
+#### Distributions
+
+SNV StopGain and Synonymous only, Including splice region variants 
+
+```{r}
+temp.1<- temp.2 <- NULL
+for (i in 1:length(filenames)){
+  D14_lib_ratio_adjusted_Ri.1 <- paste0("D14_lib_ratio_adjusted_R",i,".1")
+  D14_D5_ratio_adjusted_Ri.1 <- paste0("D14_D5_ratio_adjusted_R",i,".1")
+ 
+  temp1i <- wide %>% mutate(functional.score = !!sym(D14_lib_ratio_adjusted_Ri.1)) %>% filter(EventType %in% c("StopGain", "Synonymous")) %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G") ) %>% arrange(functional.score) 
+  temp2i <- wide %>% mutate(functional.score = !!sym(D14_D5_ratio_adjusted_Ri.1)) %>% filter(EventType %in% c("StopGain", "Synonymous")) %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G") )%>% arrange(functional.score)
+ temp.1 <- rbind(temp.1, temp1i)
+ temp.2 <- rbind(temp.2, temp2i)
+ 
+}
+
+
+p1 <- temp.1 %>%
+  ggplot( aes(x=functional.score, fill=EventType)) +
+  geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity',binwidth = 0.2) + scale_fill_manual(values=c( "red", "#69b3a2")) +  ggtitle ( "D14vsLib")
+
+
+p2 <- temp.2 %>%
+  ggplot( aes(x=functional.score, fill=EventType)) +
+  geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity',binwidth = 0.2) +  scale_fill_manual(values=c( "red", "#69b3a2")) +  ggtitle ( "D14_D5")
+# 
+
+fig <- plotly::subplot(ggplotly(p1), ggplotly(p2)) %>% 
+  layout(title = 'w. splice region variants: Left: D14_Lib, Right: D14_D5')
+fig
+```
+
+Excluding spice region
+
+```{r}
+
+temp.1<- temp.2 <- NULL
+for (i in 1:length(filenames)){
+  D14_lib_ratio_adjusted_Ri.1 <- paste0("D14_lib_ratio_adjusted_R",i,".1")
+  D14_D5_ratio_adjusted_Ri.1 <- paste0("D14_D5_ratio_adjusted_R",i,".1")
+ 
+  temp1i <- wide %>% mutate(functional.score = !!sym(D14_lib_ratio_adjusted_Ri.1)) %>% filter(EventType %in% c("StopGain", "Synonymous")) %>% filter(spliceR == FALSE) %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G") ) %>% arrange(functional.score) 
+  temp2i <- wide %>% mutate(functional.score = !!sym(D14_D5_ratio_adjusted_Ri.1)) %>% filter(EventType %in% c("StopGain", "Synonymous")) %>% filter(spliceR == FALSE) %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G") )%>% arrange(functional.score)
+ temp.1 <- rbind(temp.1, temp1i)
+ temp.2 <- rbind(temp.2, temp2i)
+ 
+}
+
+p1 <- temp.1 %>% arrange(functional.score) %>%
+  ggplot( aes(x=functional.score, fill=EventType)) +
+  geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity',binwidth = 0.2) + 
+  scale_fill_manual(values=c( "red", "#69b3a2")) +  ggtitle ( "D14vsLib")
+
+
+p2 <- temp.2 %>%
+  ggplot( aes(x=functional.score, fill=EventType)) +
+  geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity',binwidth = 0.2)  +
+  scale_fill_manual(values=c( "red", "#69b3a2")) +  ggtitle ( "D14_D5")
+
+
+fig <- plotly::subplot(ggplotly(p1), ggplotly(p2)) %>% 
+  layout(title = 'wo. splice region variants: Left: D14_Lib, Right: D14_D5')
+fig
+
+```
+
+
+StopGain and Synonymous SNV only, Excluding splice region variants 
+
+```{r}
+temp.1  %>% filter(EventType %in% c("StopGain", "Synonymous")) %>% filter(spliceR == TRUE) %>% select(EventType  , functional.score)
+```
+
+
+```{r}
+temp.2  %>% filter(EventType %in% c("StopGain", "Synonymous")) %>% filter(spliceR == TRUE) %>% select(EventType  , functional.score)
+```
+
+
+
+### D. Classification on Pre-Functional Scores
+
+#### ROC on D14_lib ratios
+
+SNVs excluding splice region, excluding variants on chunling's file.
+```{r rocfun}
+## input score and type column name, casename, controlname 
+## plot ROC, get auc, sens, spec
+##
+myroc <- function(data, scorecolumn, typecolumn, casen, controln){
+  data_long <- data %>% filter(spliceR == FALSE) %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G")) %>%filter( !!sym(typecolumn)%in% c(casen, controln))  %>% mutate(functional.score = !!sym(scorecolumn)) %>% filter(uPOS %in% wide2$uPOS)  %>% arrange(functional.score)
+  ## plot
+  par(mfrow = c(1, 1))
+  roc_score = roc(controls = data_long$functional.score[which(data_long[,typecolumn] == controln)], cases = data_long$functional.score[which(data_long[,typecolumn] == casen)], direction = ">")  # AUC score
+  plot(roc_score, main="ROC curve")
+  text(0.2, 0.2, paste0("AUC: ", round(roc_score$auc, 3)))
+  
+  out <- data.frame(functional.score = roc_score$"threshold", sens =  roc_score$"sensitivities", specs = roc_score$"specificities")
+  
+  out$avg <- out$sens+out$specs
+  
+  ind <- which(out$avg == max(out$avg))
+  if(length(ind) == 1){
+    cutoff0A <- unique(out$functional.score[ind])
+    sen0A <- out$sens[ind]
+    spec0A <- out$specs[ind]
+  
+  } else{
+    cutoff0A <- unique(out$functional.score[ind[1]])
+    sen0A <- out$sens[ind[1]]
+    spec0A <- out$specs[ind[1]]
+  }
+  
+  auc0A <- roc_score$auc
+  
+  data_long$pred.class <- ifelse(data_long$functional.score < cutoff0A, casen, controln)
+  cat("\n")
+  
+  tb0A <- table(truth = pull(data_long, typecolumn), pred = data_long$pred.class)
+  
+  ## return the metrics
+  return(list(n = nrow(data_long), cutoff = cutoff0A, auc = as.numeric(auc0A), sen = sen0A, spec = spec0A, tb = tb0A))
+}
+
+```
+
+
+
+```{r ROC0, include=TRUE, fig.width=5, fig.height=5, message=FALSE, warning=FALSE}
+
+data_long <- NULL
+
+for (i in 1:length(filenames)){
+  D14_lib_ratio_adjusted_Ri.1 <- paste0("D14_lib_ratio_adjusted_R",i,".1")
+  D14_D5_ratio_adjusted_Ri.1 <- paste0("D14_D5_ratio_adjusted_R",i,".1")
+
+  temp <- wide %>% filter(spliceR == FALSE) %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G") )%>% filter(EventType %in% c("Synonymous", "StopGain")) %>% mutate(functional.score = !!sym(D14_lib_ratio_adjusted_Ri.1)) %>% filter(uPOS %in% wide2$uPOS)
+  data_long <- rbind(data_long, temp)
+}
+ROC0 <- myroc(data_long, scorecolumn = "functional.score", typecolumn = "EventType", casen ="StopGain" , controln = "Synonymous")
+
+    cat("\n")
+    print(ROC0$tb)
+    cat("\n")
+
+```
+
+`r ROC0$cutoff` was used for the performance. sensitivity is `r ROC0$sen`, specificity is `r ROC0$spec`. 
+Note, pre-classification was done on replicates pooled together. The number of the variants were doubled or tripled in the 2x2 table. 
+
+#### ROC on D14_D5 ratios
+
+SNVs excluding splice region and variants on chunling's list
+
+```{r ROC0.1, include=TRUE, fig.width=5, fig.height=5, message=FALSE, warning=FALSE}
+
+data_long <- NULL
+for (i in 1:length(filenames)){
+  D14_lib_ratio_adjusted_Ri.1 <- paste0("D14_lib_ratio_adjusted_R",i,".1")
+  D14_D5_ratio_adjusted_Ri.1 <- paste0("D14_D5_ratio_adjusted_R",i,".1")
+
+  temp <- wide %>% filter(spliceR == FALSE) %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G") )%>% filter(EventType %in% c("Synonymous", "StopGain")) %>% mutate(functional.score = !!sym(D14_D5_ratio_adjusted_Ri.1)) %>% filter(uPOS %in% wide2$uPOS)
+  data_long <- rbind(data_long, temp)
+}
+
+ROC0.1 <- myroc(data_long, scorecolumn = "functional.score", typecolumn = "EventType", casen ="StopGain" , controln = "Synonymous")
+
+    cat("\n")
+    print(ROC0.1$tb)
+    cat("\n")
+
+```
+
+`r ROC0.1$cutoff` was used for the performance. sensitivity is `r ROC0.1$sen`, specificity is `r ROC0.1$spec`. 
+Note, pre-classification was done on replicates pooled together. The number of the variants were doubled or tripled in the 2x2 table. 
+
+#### Mixture model on D14_lib_adjusted.1
+
+Based on distribution from SNA only StopGain and synonymous without splicing variants, also exclude variants on Chunling's list, build mixture model.
+
+NOTE::: 
+
+The functional score cut offs are from the posterior probability curve. It highly depends on the actual data we have. In some senarios, we may not be able to get the values of corresponding functional scores of certain percentage. 
+
+0. IF multiple experiments, we will pool together. 
+
+1. IF the curve or posterior probability tails up to the right, there will not be a good value for 1 or 2 or 5% cutoff. 
+
+2. IF the front end points are sparse, there may not be 99%, 98% or 95% cutoff neither. 
+
+
+
+```{r MixModelfun}
+mmfun <- function(data, scorecolumn, typecolumn, casen, controln){
+  ## plot mixture model 
+  ## Get thresholds and return
+  
+  f1A <- f2A <- f3A <- f4A <- NA
+  
+  temp <- data %>% filter(!!sym(typecolumn) %in% c(casen, controln)) %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G")) %>% rename(functional.score = !!sym(scorecolumn))%>% filter(!is.na(functional.score)) %>% filter(spliceR == FALSE) %>% filter(uPOS %in% wide2$uPOS)
+  
+  m1 <- mean(temp$functional.score[which(pull(temp, typecolumn) == controln)], na.rm = TRUE)
+  tmp <- temp$functional.score[which(pull(temp, typecolumn) == controln)]
+  tmp2 <- tmp ## tmp[which(tmp > median(tmp)-sd(tmp) & tmp < median(tmp)+sd(tmp))]
+  
+  v1 <- sd(tmp2, na.rm = TRUE)
+  
+  m2 <- mean(temp$functional.score[which(pull(temp, typecolumn) == casen)])
+  v2 <- sd(temp$functional.score[which(pull(temp, typecolumn) == casen)])
+  l1 <- sum(pull(temp, typecolumn) == casen)/sum(pull(temp, typecolumn) != casen)
+  
+  error.occured <- FALSE
+  tryCatch( {
+    x <- normalmixEM(temp$functional.score, 
+                     lambda = l1, k = 2,
+                     mean.constr = c(m2, m1),
+                     sd.constr = c(v2, v1),
+                     mu = c(m2, m1), 
+                     sigma = c(v2, v1))
+    
+    par(mfrow = c(1, 1))
+    plot(temp$functional.score, x$posterior[,1], col = ifelse(temp$EventType == "StopGain", 2, 1))
+    f1A <- temp$functional.score[x$posterior[,1]>0.01][order(temp$functional.score[x$posterior[,1]>0.01], decreasing = T)][1]
+    f2A <- temp$functional.score[x$posterior[,1]>0.99][order(temp$functional.score[x$posterior[,1]>0.99], decreasing = T)][1]
+    
+    f3A <- temp$functional.score[x$posterior[,1]>0.02][order(temp$functional.score[x$posterior[,1]>0.02], decreasing = T)][1]
+    f4A <- temp$functional.score[x$posterior[,1]>0.98][order(temp$functional.score[x$posterior[,1]>0.98], decreasing = T)][1]
+    
+    
+    abline(v = f1A)
+    abline(v = f2A)
+    abline(h = 0.01)
+    abline(h = 0.99)
+    
+    abline(v = f3A, lty = 2)
+    abline(v = f4A, lty = 2)
+    abline(h = 0.02, lty = 2)
+    abline(h = 0.98, lty = 2)
+    
+    par(mfrow = c(1, 1))
+    plot(x, which=2, xlab2= "", yaxt= "n", xlim = c(range(x$x)[1]-2, range(x$x)[2]+2), main2 ="Two components with 1-99% prob(nonfunctional)", lwd2=0.8, border = "azure3")
+    lines(density(x$x), lty=2, lwd=0.8)
+    
+    abline(v = f1A)
+    abline(v = f2A)
+    abline(v = f3A, lty = 2)
+    abline(v = f4A, lty = 2)
+    
+  }
+  , error = function(e) {error.occured <<- TRUE})
+  print(error.occured)
+  return(list(error.occured = error.occured, f1 = as.numeric(f1A), f99 = as.numeric(f2A), f2=as.numeric(f3A), f98 = as.numeric(f4A)))
+}
+
+```
+
+```{r MixModel1, include=TRUE, fig.width=5, fig.height=5, message=FALSE, warning=FALSE}
+mm <- mmfun(data = temp.1, scorecolumn = "functional.score", typecolumn = "EventType", casen = "StopGain", controln = "Synonymous")
+```
+
+`r paste0("There is",  ifelse(mm$error.occured, " AN ", " NO "), "Error Ocurred")`.
+
+`r mm$f99` was the functional score corresponding to the probability of non functional at 99% and `r mm$f1` was the functional score corresponding to the probability of non functional at 1%.
+
+`r mm$f98` was the functional score corresponding to the probability of non functional at 98% and `r mm$f2` was the functional score corresponding to the probability of non functional at 2%.
+
+If we use these two thresholds to classify the variants of synonymous, stopgain and missense. 
+
+First, 1-99% cutoff
+Second, 2-98% cutoff
+
+Note: Splice regions are included in Missense, not stopgain nor synonymous
+
+```{r MixModel1.2, include=TRUE, fig.width=5, fig.height=5, message=FALSE, warning=FALSE}
+
+temp <- wide %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G"))
+temp$EventType <-factor(temp$EventType, levels = c("StopGain", "Missense", "Synonymous"))
+  
+
+if(!mm$error.occured){
+  for(i in 1:length(filenames)){
+    ctype.Ri <- paste0("ctype.R", i)
+    ctype2.Ri <- paste0("ctype2.R", i)
+    
+    D14_lib_ratio_adjusted_Ri.1 <- paste0("D14_lib_ratio_adjusted_R", i, ".1")
+    temp <- temp %>% mutate(!!sym(ctype.Ri) := ifelse( !!sym(D14_lib_ratio_adjusted_Ri.1)>mm$f1, "neutural", 
+                       ifelse(!!sym(D14_lib_ratio_adjusted_Ri.1)>mm$f99, "intermediate", "pathogenic")))
+  
+    temp[,ctype.Ri] <- factor(pull(temp, ctype.Ri),  levels = c("pathogenic", "intermediate", "neutural"))
+    temp <- temp %>% mutate(!!sym(ctype2.Ri) := ifelse( !!sym(D14_lib_ratio_adjusted_Ri.1)>mm$f2, "neutural", 
+                       ifelse(!!sym(D14_lib_ratio_adjusted_Ri.1)>mm$f98, "intermediate", "pathogenic")))
+  
+    temp[,ctype2.Ri] <- factor(pull(temp, ctype2.Ri), levels = c("pathogenic", "intermediate", "neutural"))
+    temp.check <- temp %>% filter((EventType %in% c("StopGain", "Synonymous") & spliceR == FALSE) | EventType == "Missense")
+    cat('R', i, '\n')
+    
+    cat('using f1, f99\n')
+    print(table(truth = temp.check$EventType, pred = unlist(temp.check[,ctype.Ri])))
+  cat('using f2, f98\n')
+    print(table(truth = temp.check$EventType, pred = unlist(temp.check[,ctype2.Ri])))
+  
+  }
+  
+}
+
+```
+
+Pooled together if more than one Experiment.
+
+```{r}
+
+if(!mm$error.occured){
+  ctypes <- ctypes2 <- NULL
+  for(i in 1:length(filenames)){
+    ctypes <- c(ctypes, as.character(pull(temp, paste0("ctype.R", i))))
+    
+    ctypes2 <- c(ctypes2, as.character(pull(temp, paste0("ctype2.R", i))))
+  }
+  ctypes <- factor(ctypes,  levels = c("pathogenic", "intermediate", "neutural"))
+  ctypes2 <- factor(ctypes2,  levels = c("pathogenic", "intermediate", "neutural"))
+  
+  print(table(truth = rep(temp$EventType, length(filenames)), pred = ctypes))
+  print(table(truth = rep(temp$EventType, length(filenames)), pred = ctypes2))
+}
+
+```
+
+```{r}
+
+
+## added pre-classification
+final1 <- wide
+for (i in 1: length(filenames)){
+  Ri <- paste0("R", i)
+  pred.class_Ri <- paste0("pred.class_R", i)
+  D14_lib_ratio_adjusted_Ri.1 <- paste0("D14_lib_ratio_adjusted_R", i, ".1")
+  final1 <- final1 %>% mutate(!!sym(Ri) := !!sym(D14_lib_ratio_adjusted_Ri.1)) %>%mutate(!!sym(pred.class_Ri) := case_when(!!sym(Ri) < ROC0$cutoff ~ "StopGain", .default = "Synonymous"))
+}
+
+addremove <- function(data, n){
+  final1 <- data
+  if(n ==2 ){
+    final1 <- final1 %>%
+      mutate(diff12 = R1-R2) %>%
+      mutate(meanR =  unlist(select(., R1,R2) %>% 
+                               pmap(~ mean(c(...), na.rm = T)))) %>%
+      mutate(sdR =  unlist(select(., R1,R2) %>% 
+                             pmap(~ sd(c(...), na.rm = T))) ) %>% 
+      mutate(cv =  NA) %>% 
+      mutate(removeA = (abs(diff12) >C_fc) & pred.class_R1 != pred.class_R2) %>% 
+      mutate(removeC = (abs(diff12) >C_fc)) %>%
+      mutate(removeD = (abs(diff12) >C_fc))
+  }
+  
+  if(n ==3 ){
+    
+    final1  <- final1 %>%
+      mutate(diff12 = R1-R2, diff23 = R2-R3, diff13 = R1-R3) %>%
+      mutate(meanR =  unlist(select(., R1,R2,R3) %>% mutate_all(as.numeric) %>%
+                               pmap(~ mean(c(...), na.rm = T)))) %>%
+      mutate(sdR =  unlist(select(., R1,R2,R3) %>% 
+                             pmap(~ sd(c(...), na.rm = T))) ) %>% 
+      mutate(cv = NA) %>%
+      mutate(removeA1 = ((abs(diff12) >C_fc | abs(diff13) >C_fc) & pred.class_R1 != pred.class_R2 & pred.class_R1 != pred.class_R3),
+             removeA2 = ((abs(diff12) >C_fc | abs(diff23) >C_fc) & pred.class_R2 != pred.class_R1 & pred.class_R2 != pred.class_R3),
+             removeA3 = ((abs(diff23) >C_fc | abs(diff13) >C_fc) & pred.class_R3 != pred.class_R2 & pred.class_R1 != pred.class_R3)) %>% 
+      mutate(removeC1 = (abs(diff12) >C_fc & abs(diff13) >C_fc),
+             removeC2 = (abs(diff12) >C_fc & abs(diff23) >C_fc),
+             removeC3 = (abs(diff23) >C_fc & abs(diff13) >C_fc)) %>% 
+      mutate(myD = (abs(diff12) >C_fc & abs(diff13) >C_fc) | (abs(diff12) >C_fc & abs(diff23) >C_fc) |(abs(diff23) >C_fc & abs(diff13) >C_fc) ) %>%
+      mutate(removeD1 = myD,
+             removeD2 = myD,
+             removeD3 = myD)
+    final1 <- final1 %>% select(-myD)
+  }
+  
+  if(n ==4 ){
+    final1  <- final1 %>%
+      mutate(diff12 = R1-R2, diff23 = R2-R3, diff13 = R1-R3, diff24 = R2-R4, diff14 = R1-R4, diff34 = R3-R4) %>%
+      mutate(meanR =  unlist(select(., R1,R2,R3,R4) %>% 
+                               pmap(~ mean(c(...), na.rm = T)))) %>%
+      mutate(sdR =  unlist(select(., R1,R2,R3,R4) %>% 
+                             pmap(~ sd(c(...), na.rm = T))) ) %>% 
+      mutate(cv = NA) %>%
+      mutate(removeA1 = ((abs(diff12) >C_fc | abs(diff13) >C_fc | abs(diff14) >C_fc) & pred.class_R1 != pred.class_R2 & pred.class_R1 != pred.class_R3 & pred.class_R1 != pred.class_R4),
+             removeA2 = ((abs(diff12) >C_fc | abs(diff23) >C_fc | abs(diff24) >C_fc) & pred.class_R2 != pred.class_R1 & pred.class_R2 != pred.class_R3 & pred.class_R2 != pred.class_R4),
+             removeA3 = ((abs(diff23) >C_fc | abs(diff13) >C_fc | abs(diff34) >C_fc) & pred.class_R3 != pred.class_R2 & pred.class_R1 != pred.class_R3 & pred.class_R3 != pred.class_R4),
+             removeA4 = ((abs(diff24) >C_fc | abs(diff14) >C_fc | abs(diff34) >C_fc) & pred.class_R4 != pred.class_R1 & pred.class_R4 != pred.class_R2 & pred.class_R4 != pred.class_R3)) %>% 
+      mutate(removeC1 = (abs(diff12) >C_fc & abs(diff13) >C_fc& abs(diff14) >C_fc),
+             removeC2 = (abs(diff12) >C_fc & abs(diff23) >C_fc& abs(diff24) >C_fc),
+             removeC3 = (abs(diff23) >C_fc & abs(diff13) >C_fc& abs(diff34) >C_fc),
+             removeC4 = (abs(diff14) >C_fc & abs(diff24) >C_fc& abs(diff34) >C_fc)) %>% 
+      mutate(myD = (abs(diff12) >C_fc & abs(diff13) >C_fc& abs(diff14) >C_fc) |  (abs(diff12) >C_fc & abs(diff23) >C_fc& abs(diff24) >C_fc) | (abs(diff23) >C_fc & abs(diff13) >C_fc& abs(diff34) >C_fc) |  (abs(diff14) >C_fc & abs(diff24) >C_fc& abs(diff34) >C_fc)) %>% 
+      mutate(removeD1 = myD,
+             removeD2 = myD,
+             removeD3 = myD,
+             removeD4 = myD)
+    
+    final1 <- final1 %>% select(-myD)
+  }
+  
+  if(n ==5 ){
+    final1  <- final1 %>%
+      mutate(diff12 = R1-R2, diff23 = R2-R3, diff13 = R1-R3, diff24 = R2-R4, diff14 = R1-R4, diff34 = R3-R4, diff15 = R1-R5, diff25 = R2-R5, diff35 = R3-R5, diff45 = R4-R5) %>%
+      mutate(meanR =  unlist(select(., R1,R2,R3,R4,R5) %>% 
+                               pmap(~ mean(c(...), na.rm = T)))) %>%
+      mutate(sdR =  unlist(select(., R1,R2,R3,R4,R5) %>% 
+                             pmap(~ sd(c(...), na.rm = T))) ) %>% 
+      mutate(cv = NA) %>%
+      mutate(removeA1 = ((abs(diff12) >C_fc | abs(diff13) >C_fc | abs(diff14) >C_fc | abs(diff15) >C_fc) & pred.class_R1 != pred.class_R2 & pred.class_R1 != pred.class_R3 & pred.class_R1 != pred.class_R4 & pred.class_R1 != pred.class_R5),
+             removeA2 = ((abs(diff12) >C_fc | abs(diff23) >C_fc | abs(diff24) >C_fc | abs(diff25) >C_fc) & pred.class_R2 != pred.class_R1 & pred.class_R2 != pred.class_R3 & pred.class_R2 != pred.class_R4 & pred.class_R2 != pred.class_R5),
+             removeA3 = ((abs(diff23) >C_fc | abs(diff13) >C_fc | abs(diff34) >C_fc | abs(diff35) >C_fc) & pred.class_R3 != pred.class_R2 & pred.class_R1 != pred.class_R3 & pred.class_R3 != pred.class_R4 & pred.class_R3 != pred.class_R5),
+             removeA4 = ((abs(diff24) >C_fc | abs(diff14) >C_fc | abs(diff34) >C_fc | abs(diff45) >C_fc) & pred.class_R4 != pred.class_R1 & pred.class_R4 != pred.class_R2 & pred.class_R4 != pred.class_R3 & pred.class_R4 != pred.class_R5),
+             removeA5 = ((abs(diff15) >C_fc | abs(diff25) >C_fc | abs(diff35) >C_fc | abs(diff45) >C_fc) & pred.class_R5 != pred.class_R1 & pred.class_R5 != pred.class_R2 & pred.class_R5 != pred.class_R3 & pred.class_R5 != pred.class_R4)) %>% 
+      mutate(removeC1 = (abs(diff12) >C_fc & abs(diff13) >C_fc& abs(diff14) >C_fc & abs(diff15) >C_fc),
+             removeC2 = (abs(diff12) >C_fc & abs(diff23) >C_fc& abs(diff24) >C_fc & abs(diff25) >C_fc),
+             removeC3 = (abs(diff23) >C_fc & abs(diff13) >C_fc& abs(diff34) >C_fc & abs(diff35) >C_fc),
+             removeC4 = (abs(diff14) >C_fc & abs(diff24) >C_fc& abs(diff34) >C_fc & abs(diff45) >C_fc),
+             removeC5 = (abs(diff15) >C_fc & abs(diff25) >C_fc& abs(diff35) >C_fc & abs(diff45) >C_fc)) %>% 
+      mutate(myD = (abs(diff12) >C_fc & abs(diff13) >C_fc& abs(diff14) >C_fc& abs(diff15) >C_fc) |  (abs(diff12) >C_fc & abs(diff23) >C_fc& abs(diff24) >C_fc& abs(diff25) >C_fc) | (abs(diff23) >C_fc & abs(diff13) >C_fc& abs(diff34) >C_fc& abs(diff35) >C_fc) |  (abs(diff14) >C_fc & abs(diff24) >C_fc& abs(diff34) >C_fc & abs(diff45) >C_fc) |  (abs(diff15) >C_fc & abs(diff25) >C_fc& abs(diff35) >C_fc & abs(diff45) >C_fc)) %>% 
+      mutate(removeD1 = myD,
+             removeD2 = myD,
+             removeD3 = myD,
+             removeD4 = myD,
+             removeD5 = myD)
+    
+    final1 <- final1 %>% select(-myD)
+    
+  }
+  
+  if(n == 6 ){
+    final1  <- final1 %>%
+      mutate(diff12 = R1-R2, diff23 = R2-R3, diff13 = R1-R3, diff24 = R2-R4, diff14 = R1-R4, diff34 = R3-R4, diff15 = R1-R5, diff25 = R2-R5, diff35 = R3-R5, diff45 = R4-R5, diff16 = R1-R6, diff26 = R2-R6, diff36 = R3-R6, diff46 = R4-R6, diff56 = R5-R6) %>%
+      mutate(meanR =  unlist(select(., R1,R2,R3,R4,R5,R6) %>% 
+                               pmap(~ mean(c(...), na.rm = T)))) %>%
+      mutate(sdR =  unlist(select(., R1,R2,R3,R4,R5,R6) %>% 
+                             pmap(~ sd(c(...), na.rm = T))) ) %>% 
+      mutate(cv = NA) %>%
+      mutate(removeA1 = ((abs(diff12) >C_fc | abs(diff13) >C_fc | abs(diff14) >C_fc | abs(diff15) >C_fc | abs(diff16) >C_fc) & pred.class_R1 != pred.class_R2 & pred.class_R1 != pred.class_R3 & pred.class_R1 != pred.class_R4 & pred.class_R1 != pred.class_R5 & pred.class_R1 != pred.class_R6),
+             removeA2 = ((abs(diff12) >C_fc | abs(diff23) >C_fc | abs(diff24) >C_fc | abs(diff25) >C_fc | abs(diff26) >C_fc) & pred.class_R2 != pred.class_R1 & pred.class_R2 != pred.class_R3 & pred.class_R2 != pred.class_R4 & pred.class_R2 != pred.class_R5 & pred.class_R2 != pred.class_R6),
+             removeA3 = ((abs(diff23) >C_fc | abs(diff13) >C_fc | abs(diff34) >C_fc | abs(diff35) >C_fc | abs(diff36) >C_fc) & pred.class_R3 != pred.class_R2 & pred.class_R1 != pred.class_R3 & pred.class_R3 != pred.class_R4 & pred.class_R3 != pred.class_R5 & pred.class_R3 != pred.class_R6),
+             removeA4 = ((abs(diff24) >C_fc | abs(diff14) >C_fc | abs(diff34) >C_fc | abs(diff45) >C_fc | abs(diff46) >C_fc) & pred.class_R4 != pred.class_R1 & pred.class_R4 != pred.class_R2 & pred.class_R4 != pred.class_R3 & pred.class_R4 != pred.class_R5 & pred.class_R4 != pred.class_R6),
+             removeA5 = ((abs(diff15) >C_fc | abs(diff25) >C_fc | abs(diff35) >C_fc | abs(diff45) >C_fc | abs(diff56) >C_fc) & pred.class_R5 != pred.class_R1 & pred.class_R5 != pred.class_R2 & pred.class_R5 != pred.class_R3 & pred.class_R5 != pred.class_R4 & pred.class_R5 != pred.class_R6),
+             removeA6 = ((abs(diff16) >C_fc | abs(diff26) >C_fc | abs(diff36) >C_fc | abs(diff46) >C_fc | abs(diff56) >C_fc) & pred.class_R5 != pred.class_R1 & pred.class_R5 != pred.class_R2 & pred.class_R5 != pred.class_R3 & pred.class_R5 != pred.class_R4 & pred.class_R5 != pred.class_R6)) %>% 
+      mutate(removeC1 = (abs(diff12) >C_fc & abs(diff13) >C_fc& abs(diff14) >C_fc & abs(diff15) >C_fc & abs(diff16) >C_fc),
+             removeC2 = (abs(diff12) >C_fc & abs(diff23) >C_fc& abs(diff24) >C_fc & abs(diff25) >C_fc & abs(diff26) >C_fc),
+             removeC3 = (abs(diff23) >C_fc & abs(diff13) >C_fc& abs(diff34) >C_fc & abs(diff35) >C_fc & abs(diff36) >C_fc),
+             removeC4 = (abs(diff14) >C_fc & abs(diff24) >C_fc& abs(diff34) >C_fc & abs(diff45) >C_fc & abs(diff46) >C_fc),
+             removeC5 = (abs(diff15) >C_fc & abs(diff25) >C_fc& abs(diff35) >C_fc & abs(diff45) >C_fc & abs(diff56) >C_fc),
+             removeC6 = (abs(diff16) >C_fc & abs(diff26) >C_fc& abs(diff36) >C_fc & abs(diff46) >C_fc & abs(diff56) >C_fc)) %>% 
+      mutate(myD = (abs(diff12) >C_fc & abs(diff13) >C_fc& abs(diff14) >C_fc& abs(diff15) >C_fc & abs(diff16) >C_fc) |  (abs(diff12) >C_fc & abs(diff23) >C_fc& abs(diff24) >C_fc& abs(diff25) >C_fc & abs(diff26) >C_fc) | (abs(diff23) >C_fc & abs(diff13) >C_fc& abs(diff34) >C_fc& abs(diff35) >C_fc & abs(diff36) >C_fc) |  (abs(diff14) >C_fc & abs(diff24) >C_fc& abs(diff34) >C_fc & abs(diff45) >C_fc & abs(diff46) >C_fc) |  (abs(diff15) >C_fc & abs(diff25) >C_fc& abs(diff35) >C_fc & abs(diff45) >C_fc & abs(diff56) >C_fc)) %>% 
+      mutate(removeD1 = myD,
+             removeD2 = myD,
+             removeD3 = myD,
+             removeD4 = myD,
+             removeD5 = myD,
+             removeD6 = myD)
+    
+    final1 <- final1 %>% select(-myD)
+  }
+  return(final1)
+  .
+}
+
+
+addscores <- function(data, n){
+  final1 <- data
+  if(n== 1){ # one sample
+    final1$functional.scoreA <- final1$functional.scoreB <- final1$functional.scoreC <- final1$functional.scoreD <- final1$R1
+  } else if(n == 2){# two samples
+    #A
+    temp <- final1 %>% select(R1, R2) 
+    temp$R1[which(final1$removeA == TRUE)] <- NA
+    temp$R2[which(final1$removeA == TRUE)] <- NA
+    
+    final1$functional.scoreA <- apply(temp, 1, mean, na.rm = TRUE)
+    #B
+    final1$functional.scoreB <- final1$meanR
+    #C
+    temp <- final1 %>% select(R1, R2) # # Note: this was missing 1/31/2024
+    temp$R1[which(final1$removeC == TRUE)] <- NA
+    temp$R2[which(final1$removeC == TRUE)] <- NA
+    
+    final1$functional.scoreC <- apply(temp, 1, mean, na.rm = TRUE) # remove variants if two replicate differ by 1
+    #D
+    final1$functional.scoreD <- apply(temp, 1, mean, na.rm = TRUE) # remove variants if two replicate differ by 1
+
+  } else if(n == 3){# three samples
+    #A
+    temp <- final1 %>% select(R1, R2, R3) 
+
+    temp$R1[which(final1$removeA1 == TRUE)] <- NA
+    temp$R2[which(final1$removeA2 == TRUE)] <- NA
+    temp$R3[which(final1$removeA3 == TRUE)] <- NA
+    
+    
+    final1$functional.scoreA <- apply(temp, 1, mean, na.rm = TRUE)
+  
+    #B
+    final1$functional.scoreB <- final1$meanR
+    
+    #C
+    temp <- final1 %>% select(R1, R2, R3) # Note: this was missing 1/8/2024
+    temp$R1[which(final1$removeC1 == TRUE)] <- NA
+    temp$R2[which(final1$removeC2 == TRUE)] <- NA
+    temp$R3[which(final1$removeC3 == TRUE)] <- NA
+    
+    final1$functional.scoreC <- apply(temp, 1, mean, na.rm = TRUE)
+    #D
+    temp <- final1 %>% select(R1, R2, R3) # added
+    temp$R1[which(final1$removeD1 == TRUE)] <- NA
+    temp$R2[which(final1$removeD2 == TRUE)] <- NA
+    temp$R3[which(final1$removeD3 == TRUE)] <- NA
+    
+    final1$functional.scoreD <- apply(temp, 1, mean, na.rm = TRUE)
+  }else if(n == 4){ # four samples
+    #A
+    temp <- final1 %>% select(R1, R2, R3, R4) 
+
+    temp$R1[which(final1$removeA1 == TRUE)] <- NA
+    temp$R2[which(final1$removeA2 == TRUE)] <- NA
+    temp$R3[which(final1$removeA3 == TRUE)] <- NA
+    temp$R4[which(final1$removeA4 == TRUE)] <- NA
+    
+    
+    final1$functional.scoreA <- apply(temp, 1, mean, na.rm = TRUE)
+  
+    #B
+    final1$functional.scoreB <- final1$meanR
+    
+    #C
+    temp <- final1 %>% select(R1, R2, R3, R4) # this was missing 1/8/2024
+    temp$R1[which(final1$removeC1 == TRUE)] <- NA
+    temp$R2[which(final1$removeC2 == TRUE)] <- NA
+    temp$R3[which(final1$removeC3 == TRUE)] <- NA
+    temp$R4[which(final1$removeC4 == TRUE)] <- NA
+    
+    final1$functional.scoreC <- apply(temp, 1, mean, na.rm = TRUE)
+    
+    #D
+    temp <- final1 %>% select(R1, R2, R3, R4) 
+    temp$R1[which(final1$removeD1 == TRUE)] <- NA
+    temp$R2[which(final1$removeD2 == TRUE)] <- NA
+    temp$R3[which(final1$removeD3 == TRUE)] <- NA
+    temp$R4[which(final1$removeD4 == TRUE)] <- NA
+    
+    final1$functional.scoreD <- apply(temp, 1, mean, na.rm = TRUE)
+    
+  }else if(n == 5){ ## five samples
+    #A
+    temp <- final1 %>% select(R1, R2, R3, R4, R5) 
+
+    temp$R1[which(final1$removeA1 == TRUE)] <- NA
+    temp$R2[which(final1$removeA2 == TRUE)] <- NA
+    temp$R3[which(final1$removeA3 == TRUE)] <- NA
+    temp$R4[which(final1$removeA4 == TRUE)] <- NA
+    temp$R5[which(final1$removeA5 == TRUE)] <- NA  
+    
+    final1$functional.scoreA <- apply(temp, 1, mean, na.rm = TRUE)
+  
+    #B
+    final1$functional.scoreB <- final1$meanR
+    
+    #C
+    temp <- final1 %>% select(R1, R2, R3, R4, R5) # this was missing 1/8/2024
+    temp$R1[which(final1$removeC1 == TRUE)] <- NA
+    temp$R2[which(final1$removeC2 == TRUE)] <- NA
+    temp$R3[which(final1$removeC3 == TRUE)] <- NA
+    temp$R4[which(final1$removeC4 == TRUE)] <- NA
+    temp$R5[which(final1$removeC5 == TRUE)] <- NA
+    
+    final1$functional.scoreC <- apply(temp, 1, mean, na.rm = TRUE)
+    
+    #D
+    temp <- final1 %>% select(R1, R2, R3, R4, R5) 
+    temp$R1[which(final1$removeD1 == TRUE)] <- NA
+    temp$R2[which(final1$removeD2 == TRUE)] <- NA
+    temp$R3[which(final1$removeD3 == TRUE)] <- NA
+    temp$R4[which(final1$removeD4 == TRUE)] <- NA
+    temp$R5[which(final1$removeD5 == TRUE)] <- NA
+    
+    final1$functional.scoreD <- apply(temp, 1, mean, na.rm = TRUE)
+  } else if(n == 6){ ## six samples
+    #A
+    temp <- final1 %>% select(R1, R2, R3, R4, R5, R6) 
+
+    temp$R1[which(final1$removeA1 == TRUE)] <- NA
+    temp$R2[which(final1$removeA2 == TRUE)] <- NA
+    temp$R3[which(final1$removeA3 == TRUE)] <- NA
+    temp$R4[which(final1$removeA4 == TRUE)] <- NA
+    temp$R5[which(final1$removeA5 == TRUE)] <- NA 
+    temp$R5[which(final1$removeA6 == TRUE)] <- NA  
+    
+    final1$functional.scoreA <- apply(temp, 1, mean, na.rm = TRUE)
+  
+    #B
+    final1$functional.scoreB <- final1$meanR
+    
+    #C
+    temp <- final1 %>% select(R1, R2, R3, R4, R5) # this was missing 1/8/2024
+    temp$R1[which(final1$removeC1 == TRUE)] <- NA
+    temp$R2[which(final1$removeC2 == TRUE)] <- NA
+    temp$R3[which(final1$removeC3 == TRUE)] <- NA
+    temp$R4[which(final1$removeC4 == TRUE)] <- NA
+    temp$R5[which(final1$removeC5 == TRUE)] <- NA
+    
+    final1$functional.scoreC <- apply(temp, 1, mean, na.rm = TRUE)
+    
+    #D
+    temp <- final1 %>% select(R1, R2, R3, R4, R5) 
+    temp$R1[which(final1$removeD1 == TRUE)] <- NA
+    temp$R2[which(final1$removeD2 == TRUE)] <- NA
+    temp$R3[which(final1$removeD3 == TRUE)] <- NA
+    temp$R4[which(final1$removeD4 == TRUE)] <- NA
+    temp$R5[which(final1$removeD5 == TRUE)] <- NA
+    
+    final1$functional.scoreD <- apply(temp, 1, mean, na.rm = TRUE)
+  } else{
+    return(final1)
+  }
+  return(final1)
+}
+
+## add removes
+final1 <- addremove(final1, n = length(filenames))
+## add scores.
+final1 <- addscores(final1, n = length(filenames))
+
+final1$cv[which(!is.na(final1$meanR))] <- unlist(final1$sdR[which(!is.na(final1$meanR))]) / unlist(final1$meanR[which(!is.na(final1$meanR))])* 100 
+
+
+```
+
+
+#### Mixture model on D14_D5
+
+Based on distribution from StopGain and synonymous without splicing variants and exclude variants on Chunling's list, build mixture model.
+
+NOTE::: 
+
+The functional score cut offs are from the posterior probability curve. It highly depends on the actual data we have. In some senarios, we may not be able to get the values of corresponding functional scores of certain percentage. 
+
+1. IF the curve or posterior probability tails up to the right, there will not be a good value for 1 or 2 or 5% cutoff. 
+
+2. IF the front end points are sparse, there may not be 99%, 98% or 95% cutoff neither. 
+
+
+
+```{r D14D5_MixModel1, include=TRUE, fig.width=5, fig.height=5, message=FALSE, warning=FALSE}
+
+mm1 <- mmfun(data = temp.2, scorecolumn = "functional.score", typecolumn = "EventType", casen = "StopGain", controln = "Synonymous")
+
+```
+
+`r paste0("There is",  ifelse(mm1$error.occured, " AN ", " NO "), "Error Ocurred")`.
+
+`r mm1$f99` was the functional score corresponding to the probability of non functional at 99% and `r mm1$f1` was the functional score corresponding to the probability of non functional at 1%.
+
+`r mm1$f98` was the functional score corresponding to the probability of non functional at 98% and `r mm1$f2` was the functional score corresponding to the probability of non functional at 2%.
+
+If we use these two thresholds to classify the variants of synonymous, stopgain and missense. 
+
+First, 1-99% cutoff
+Second, 2-98% cutoff
+
+
+Note: Splice regions are included in Missense, not stopgain nor synonymous
+
+```{r D14_D5_MixModel1.2, include=TRUE, fig.width=5, fig.height=5, message=FALSE, warning=FALSE}
+temp <- wide %>% filter(spliceR == FALSE) %>% filter(EventType %in% c("Synonymous", "StopGain")) %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G"))
+
+temp2 <- wide %>% filter(EventType %in% c("Missense")) %>%  filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G"))
+
+
+temp <- rbind(temp, temp2)
+
+if(!mm1$error.occured){
+  for(i in 1:length(filenames)){
+    ctype.Ri <- paste0("ctype.R", i)
+    ctype2.Ri <- paste0("ctype2.R", i)
+    
+    D14_D5_ratio_adjusted_Ri.1 <- paste0("D14_D5_ratio_adjusted_R", i, ".1")
+    temp <- temp %>% mutate(!!sym(ctype.Ri) := ifelse( !!sym(D14_D5_ratio_adjusted_Ri.1)>mm1$f1, "neutural", 
+                       ifelse(!!sym(D14_D5_ratio_adjusted_Ri.1)>mm1$f99, "intermediate", "pathogenic")))
+  
+    temp[,ctype.Ri] <- factor(pull(temp, ctype.Ri),  levels = c("pathogenic", "intermediate", "neutural"))
+    temp <- temp %>% mutate(!!sym(ctype2.Ri) := ifelse( !!sym(D14_D5_ratio_adjusted_Ri.1)>mm1$f2, "neutural", 
+                       ifelse(!!sym(D14_D5_ratio_adjusted_Ri.1)>mm1$f98, "intermediate", "pathogenic")))
+  
+    temp[,ctype2.Ri] <- factor(pull(temp, ctype2.Ri), levels = c("pathogenic", "intermediate", "neutural"))
+    temp.check <- temp %>% filter((EventType %in% c("StopGain", "Synonymous") & spliceR == FALSE) | EventType == "Missense")
+    cat('R', i, '\n')
+    
+    cat('using f1, f99\n')
+    print(table(truth = temp.check$EventType, pred = unlist(temp.check[,ctype.Ri])))
+  cat('using f2, f98\n')
+    print(table(truth = temp.check$EventType, pred = unlist(temp.check[,ctype2.Ri])))
+  
+  }
+}
+
+```
+
+
+Pooled together if more than one experiment.
+
+```{r}
+if(!mm1$error.occured){
+  ctypes <- ctypes2 <- NULL
+  for(i in 1:length(filenames)){
+    ctypes <- c(ctypes, unlist(temp[, paste0("ctype.R", i)]))
+    ctypes2 <- c(ctypes2, unlist(temp[, paste0("ctype2.R", i)]))
+  }
+  print(table(truth = rep(temp$EventType, length(filenames)), pred = ctypes))
+  print(table(truth = rep(temp$EventType, length(filenames)), pred = ctypes2))
+}
+```
+
+```{r}
+## added pre-classification
+final2 <- wide
+for (i in 1: length(filenames)){
+  Ri <- paste0("R", i)
+  pred.class_Ri <- paste0("pred.class_R", i)
+  D14_D5_ratio_adjusted_Ri.1 <- paste0("D14_D5_ratio_adjusted_R", i, ".1")
+  final2 <- final2 %>% mutate(!!sym(Ri) := !!sym(D14_D5_ratio_adjusted_Ri.1)) %>%
+    mutate(!!sym(pred.class_Ri) := ifelse(!!sym(Ri) < ROC0.1$cutoff, "StopGain", "Synonymous")) ## fixed cutoff0. 1/12/2024
+}
+
+## add removes
+final2 <- addremove(final2, n = length(filenames))
+## add scores.
+final2 <- addscores(final2, n = length(filenames))
+
+final2$cv[which(!is.na(final2$meanR))] <- unlist(final2$sdR[which(!is.na(final2$meanR))]) / unlist(final2$meanR[which(!is.na(final2$meanR))])* 100 
+
+```
+
+
+
+### E. single variant Functional Scores
+
+single variant Functional scores are average of individual experiment scores based on pre-classification (removeA1, removeA2, removeA3, removeA4).
+By contrast, version B are average of individual experiment pre-functional scores without removing any data.
+
+#### Distributions A
+
+Note: ScoreA is mean of replicates after applying removeA1, ..., `r length(filenames)`
+
+StopGain and Synonymous only, Including splice region variants 
+
+```{r}
+
+p1 <- final1 %>% filter(EventType %in% c("StopGain", "Synonymous")) %>%  filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G")) %>%
+  ggplot( aes(x=functional.scoreA, fill=EventType)) +
+  geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity',binwidth = 0.2) + scale_fill_manual(values=c( "red", "#69b3a2")) +  ggtitle ( "D14vsLib")
+
+
+p2 <- final2 %>% filter(EventType %in% c("StopGain", "Synonymous")) %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G")) %>%
+  ggplot( aes(x=functional.scoreA, fill=EventType)) +
+  geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity',binwidth = 0.2) +  scale_fill_manual(values=c( "red", "#69b3a2")) +  ggtitle ( "D14_D5")
+# 
+# combined <- p1 + p2 & theme(legend.position = "bottom")
+# (combined + plot_layout(guides = "collect"))
+fig <- plotly::subplot(ggplotly(p1), ggplotly(p2)) %>% 
+  layout(title = 'w. splice region variants: Left: D14_Lib, Right: D14_D5')
+fig
+```
+
+
+StopGain and Synonymous SNV only, Excluding splice region variants 
+
+
+```{r}
+
+p1 <- final1 %>% filter(EventType %in% c("StopGain", "Synonymous")) %>% filter(spliceR == FALSE) %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G")) %>% arrange(functional.scoreA) %>%
+  ggplot( aes(x=functional.scoreA, fill=EventType)) +
+  geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity',binwidth = 0.2) + 
+  scale_fill_manual(values=c( "red", "#69b3a2")) +  ggtitle ( "D14vsLib single variant functional score A")
+
+
+p2 <- final2 %>% filter(EventType %in% c("StopGain", "Synonymous")) %>% filter(spliceR == FALSE) %>%filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G")) %>% arrange(functional.scoreA) %>%
+  ggplot( aes(x=functional.scoreA, fill=EventType)) +
+  geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity',binwidth = 0.2)  +
+  scale_fill_manual(values=c( "red", "#69b3a2")) +  ggtitle ( "D14_D5 single variant functional score A")
+
+# combined <- p1 + p2 & theme(legend.position = "bottom")
+# (combined + plot_layout(guides = "collect"))
+fig <- plotly::subplot(ggplotly(p1), ggplotly(p2)) %>% 
+  layout(title = 'wo. splice region variants: Left: D14_Lib, Right: D14_D5')
+fig
+
+```
+
+D14vLib splice region SNV variants 
+
+```{r}
+options(digits = 3)
+final1  %>% filter(EventType %in% c("StopGain", "Synonymous")) %>% filter(spliceR == TRUE) %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G")) %>%select(EventType  , functional.scoreA)
+```
+
+D14vD5 splice region SNV variants 
+
+```{r}
+final2  %>% filter(EventType %in% c("StopGain", "Synonymous")) %>% filter(spliceR == TRUE) %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G")) %>%select(EventType  , functional.scoreA)
+```
+
+#### Distributions B
+
+Note: ScoreB is mean of replicates without removing any variant.
+
+StopGain and Synonymous only, Including splice region variants 
+
+```{r}
+Rcol <- colnames(final1)[which(colnames(final1) %in% c("R1", "R2", "R3", "R4", "R5", "R6"))]
+p1 <- final1 %>% filter(EventType %in% c("StopGain", "Synonymous")) %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G")) %>%
+  ggplot( aes(x=functional.scoreB, fill=EventType)) +
+  geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity',binwidth = 0.2) + scale_fill_manual(values=c( "red", "#69b3a2")) +  ggtitle ( "D14vsLib single variant functional.scoreB")
+
+
+p2 <- final2 %>% filter(EventType %in% c("StopGain", "Synonymous"))%>%filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G")) %>%
+  ggplot( aes(x=functional.scoreB, fill=EventType)) +
+  geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity',binwidth = 0.2) +  scale_fill_manual(values=c( "red", "#69b3a2")) +  ggtitle ( "D14_D5 single variant functional.scoreB")
+
+# combined <- p1 + p2 & theme(legend.position = "bottom")
+# (combined + plot_layout(guides = "collect"))
+
+fig <- plotly::subplot(ggplotly(p1), ggplotly(p2)) %>% 
+  layout(title = 'w. splice region variants: Left: D14_Lib, Right: D14_D5')
+fig
+
+```
+
+
+StopGain and Synonymous SNV only, Excluding splice region variants 
+
+
+
+```{r}
+
+p1 <- final1 %>% filter(EventType %in% c("StopGain", "Synonymous")) %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G")) %>%filter(spliceR == FALSE) %>% arrange(functional.scoreB) %>% 
+  ggplot( aes(x=functional.scoreB, fill=EventType)) +
+  geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity',binwidth = 0.2) + 
+  scale_fill_manual(values=c( "red", "#69b3a2")) +  ggtitle ( "D14vsLib functional scoreB")
+
+
+p2 <- final2 %>% filter(EventType %in% c("StopGain", "Synonymous")) %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G")) %>%filter(spliceR == FALSE) %>% arrange(functional.scoreB) %>% 
+  ggplot( aes(x=functional.scoreB, fill=EventType)) +
+  geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity',binwidth = 0.2)  +
+  scale_fill_manual(values=c( "red", "#69b3a2")) +  ggtitle ( "D14_D5 functional scoreB")
+
+# combined <- p1 + p2 & theme(legend.position = "bottom")
+# (combined + plot_layout(guides = "collect"))
+
+fig <- plotly::subplot(ggplotly(p1), ggplotly(p2)) %>% 
+  layout(title = 'wo. splice region variants: Left: D14_Lib, Right: D14_D5')
+fig
+
+```
+
+D14vLib splice region variants 
+
+```{r}
+final1  %>% filter(EventType %in% c("StopGain", "Synonymous")) %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G")) %>%filter(spliceR == TRUE) %>% select(EventType  , functional.scoreB)
+```
+
+D14vD5 splice region variants 
+
+```{r}
+final2  %>% filter(EventType %in% c("StopGain", "Synonymous")) %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G")) %>%filter(spliceR == TRUE) %>% select(EventType  , functional.scoreB)
+```
+
+
+
+#### Distributions C
+Note: ScoreC is mean of replicates after applying removeC1, 2, 3,4
+StopGain and Synonymous only, Including splice region variants 
+
+```{r}
+Rcol <- colnames(final1)[which(colnames(final1) %in% c("R1", "R2", "R3", "R4", "R5", "R6"))]
+p1 <- final1 %>% filter(EventType %in% c("StopGain", "Synonymous")) %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G")) %>%
+  ggplot( aes(x=functional.scoreC, fill=EventType)) +
+  geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity',binwidth = 0.2) + scale_fill_manual(values=c( "red", "#69b3a2")) +  ggtitle ( "D14vsLib single variant functional.scoreC")
+
+
+p2 <- final2 %>% filter(EventType %in% c("StopGain", "Synonymous"))%>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G")) %>%
+  ggplot( aes(x=functional.scoreC, fill=EventType)) +
+  geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity',binwidth = 0.2) +  scale_fill_manual(values=c( "red", "#69b3a2")) +  ggtitle ( "D14_D5 single variant functional.scoreC")
+
+# combined <- p1 + p2 & theme(legend.position = "bottom")
+# (combined + plot_layout(guides = "collect"))
+
+fig <- plotly::subplot(ggplotly(p1), ggplotly(p2)) %>% 
+  layout(title = 'w. splice region variants: Left: D14_Lib, Right: D14_D5')
+fig
+
+```
+
+
+StopGain and Synonymous SNV only, Excluding splice region variants 
+
+
+```{r}
+
+p1 <- final1 %>% filter(EventType %in% c("StopGain", "Synonymous")) %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G")) %>%filter(spliceR == FALSE) %>% arrange(functional.scoreC) %>% 
+  ggplot( aes(x=functional.scoreC, fill=EventType)) +
+  geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity',binwidth = 0.2) + 
+  scale_fill_manual(values=c( "red", "#69b3a2")) +  ggtitle ( "D14vsLib functional scoreC")
+
+
+p2 <- final2 %>% filter(EventType %in% c("StopGain", "Synonymous")) %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G")) %>%filter(spliceR == FALSE) %>% arrange(functional.scoreB) %>% 
+  ggplot( aes(x=functional.scoreC, fill=EventType)) +
+  geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity',binwidth = 0.2)  +
+  scale_fill_manual(values=c( "red", "#69b3a2")) +  ggtitle ( "D14_D5 functional scoreC")
+
+# combined <- p1 + p2 & theme(legend.position = "bottom")
+# (combined + plot_layout(guides = "collect"))
+
+fig <- plotly::subplot(ggplotly(p1), ggplotly(p2)) %>% 
+  layout(title = 'wo. splice region variants: Left: D14_Lib, Right: D14_D5')
+fig
+
+```
+
+D14vLib splice region variants 
+
+```{r}
+final1  %>% filter(EventType %in% c("StopGain", "Synonymous")) %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G")) %>%filter(spliceR == TRUE) %>% select(EventType  , functional.scoreC)
+```
+
+D14vD5 splice region variants 
+
+```{r}
+final2  %>% filter(EventType %in% c("StopGain", "Synonymous")) %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G")) %>%filter(spliceR == TRUE) %>% select(EventType  , functional.scoreC)
+```
+
+
+
+#### Distributions D
+Note: ScoreD is mean of replicates after applying removeD1, 2, 3,4
+StopGain and Synonymous only, Including splice region variants 
+
+```{r}
+Rcol <- colnames(final1)[which(colnames(final1) %in% c("R1", "R2", "R3", "R4", "R5", "R6"))]
+p1 <- final1 %>% filter(EventType %in% c("StopGain", "Synonymous")) %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G")) %>%
+  ggplot( aes(x=functional.scoreD, fill=EventType)) +
+  geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity',binwidth = 0.2) + scale_fill_manual(values=c( "red", "#69b3a2")) +  ggtitle ( "D14vsLib single variant functional.scoreD")
+
+
+p2 <- final2 %>% filter(EventType %in% c("StopGain", "Synonymous"))%>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G")) %>%
+  ggplot( aes(x=functional.scoreD, fill=EventType)) +
+  geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity',binwidth = 0.2) +  scale_fill_manual(values=c( "red", "#69b3a2")) +  ggtitle ( "D14_D5 single variant functional.scoreD")
+
+# combined <- p1 + p2 & theme(legend.position = "bottom")
+# (combined + plot_layout(guides = "collect"))
+
+fig <- plotly::subplot(ggplotly(p1), ggplotly(p2)) %>% 
+  layout(title = 'w. splice region variants: Left: D14_Lib, Right: D14_D5')
+fig
+
+```
+
+
+StopGain and Synonymous SNV only, Excluding splice region variants 
+
+
+```{r}
+
+p1 <- final1 %>% filter(EventType %in% c("StopGain", "Synonymous")) %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G")) %>%filter(spliceR == FALSE) %>% arrange(functional.scoreD) %>% 
+  ggplot( aes(x=functional.scoreD, fill=EventType)) +
+  geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity',binwidth = 0.2) + 
+  scale_fill_manual(values=c( "red", "#69b3a2")) +  ggtitle ( "D14vsLib functional scoreC")
+
+
+p2 <- final2 %>% filter(EventType %in% c("StopGain", "Synonymous")) %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G")) %>%filter(spliceR == FALSE) %>% arrange(functional.scoreD) %>% 
+  ggplot( aes(x=functional.scoreD, fill=EventType)) +
+  geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity',binwidth = 0.2)  +
+  scale_fill_manual(values=c( "red", "#69b3a2")) +  ggtitle ( "D14_D5 functional scoreC")
+
+# combined <- p1 + p2 & theme(legend.position = "bottom")
+# (combined + plot_layout(guides = "collect"))
+
+fig <- plotly::subplot(ggplotly(p1), ggplotly(p2)) %>% 
+  layout(title = 'wo. splice region variants: Left: D14_Lib, Right: D14_D5')
+fig
+
+```
+
+D14vLib splice region variants 
+
+```{r}
+final1  %>% filter(EventType %in% c("StopGain", "Synonymous")) %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G")) %>%filter(spliceR == TRUE) %>% select(EventType  , functional.scoreC)
+```
+
+D14vD5 splice region variants 
+
+```{r}
+final2  %>% filter(EventType %in% c("StopGain", "Synonymous")) %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G")) %>%filter(spliceR == TRUE) %>% select(EventType  , functional.scoreC)
+```
+
+
+### F. Classification on single variant Functional Scores
+
+
+```{r rocs, echo = FALSE, results = 'asis', fig.width= 5, fig.height=5}
+## since not all Exon has HDR two categories we will customize the report here
+## 
+
+ROCs0 <- list()
+
+for(score in c("A", "B", "C", "D")){
+  cat("\n")
+  cat("#### ROC on D14_lib single variant functional score", score, "\n")
+  
+  cat("SNVs excluding splice region and variants on Chunling's list\n")
+  
+  ROCs0A <- myroc(final1, scorecolumn = paste0("functional.score",score), typecolumn = "EventType", casen = "StopGain", controln = "Synonymous")
+  names(ROCs0A) <- paste0(names(ROCs0A),score)
+    
+  cat("\n")
+    print(ROCs0A$tb)
+    cat("\n")
+  
+  cat("\n")
+  
+  cat(ROCs0A$cutoff, " was used for the performance. sensitivity is ", ROCs0A$sen, " specificity is ", ROCs0A$spec, ".\n",
+      "Note, The number of the variants are the actual variants in the  table. \n")
+  ROCs0 <- append(ROCs0, ROCs0A)
+}
+
+ROCs0.1 <- list()
+
+for(score in c("A", "B", "C", "D")){
+  cat("\n")
+  cat("#### ROC on D14_D5 single variant functional score", score, "\n")
+  
+  cat("SNVs excluding splice region and variants on Chunling's list\n")
+  
+  ROCs0A.1 <- myroc(final2, scorecolumn = paste0("functional.score",score), typecolumn = "EventType", casen = "StopGain", controln = "Synonymous")
+  cat("\n")
+      cat("\n")
+    print(ROCs0A.1$tb)
+    cat("\n")
+    
+  names(ROCs0A.1) <- paste0(names(ROCs0A.1), score)
+  cat(ROCs0A.1$cutoff, " was used for the performance. sensitivity is ", ROCs0A.1$sen, " specificity is ", ROCs0A.1$spec, ".\n",
+      "Note, The number of the variants are the actual variants in the  table. \n\n")
+  ROCs0.1 <- append(ROCs0.1, ROCs0A.1)
+}
+
+```
+
+
+```{r ROCh, echo = FALSE, results = 'asis', fig.width= 5, fig.height=5}
+## since not all Exon has HDR two categories we will customize the report here
+## 
+if(!is.null(params$HDRfile)){
+  final1 <-  merge(final1, HDR, by.x = "uPOS", by.y = "uPOS", all.x = T) 
+  final2 <- merge(final2, HDR, by.x = "uPOS", by.y = "uPOS", all.x = T) 
+  dt <- final1 %>% filter(!is.na(htype))
+  dt2 <- final2 %>% filter(!is.na(htype))
+  
+  ROC0h <- list()
+  if(length(unique(dt$htype))>1){
+    for(score in c("A", "B", "C", "D")){
+      cat("#### ROC on HDR v D14_lib single variant functional score", score," \n")
+  
+      cat("HDR SNVs excluding splice region and variants on Chunling's list\n")
+      ## add a gate to avoid error on no case
+      ## 
+      temp <- dt[, c("htype", paste0("functional.score",score))]
+      Na <- sum(!is.na(temp[temp$htype == "Abnormal",2])); Nn <- sum(!is.na(temp[temp$htype == "Normal",2]))
+      if(Na >0 & Nn > 0){
+        ROC0hA <- myroc(dt, scorecolumn = paste0("functional.score",score), typecolumn = "htype", casen = "Abnormal", controln = "Normal")
+      cat("\n")
+      print(ROC0hA$tb)
+      cat("\n")
+      cat(ROC0hA$cutoff, " was used for the performance. sensitivity is ", ROC0hA$sen, " specificity is ", ROC0hA$spec, ".\n\n",
+          "Note, The number of the variants are the actual variants in the  table.",  ROC0hA$n, "\n\n")
+      }else{
+         ROC0hA <- list(n=NA, cutoff = NA, auc = NA, sen = NA, spec = NA, tb = NA)
+      }
+      names(ROC0hA) <- paste0(names(ROC0hA), score)
+      ROC0h <- c(ROC0h, ROC0hA)
+    }
+  }
+  
+  ROC0h.1 <- list()
+  if(length(unique(dt2$htype))>1){
+    for(score in c("A", "B", "C", "D")){
+      cat("\n")
+      cat("#### ROC on HDR v D14_D5 single variant functional score ", score," \n")
+  
+      cat("HDR SNVs excluding splice region and variants on Chunling's list\n")
+      
+      ## add a gate to avoid error on no case
+      ## 
+      temp <- dt2[, c("htype", paste0("functional.score",score))]
+      Na <- sum(!is.na(temp[temp$htype == "Abnormal",2])); Nn <- sum(!is.na(temp[temp$htype == "Normal",2]))
+      if(Na >0 & Nn > 0){
+        ROC0hA.1 <- myroc(dt2, scorecolumn = paste0("functional.score",score), typecolumn = "htype", casen = "Abnormal", controln = "Normal")
+      cat("\n")
+      print(ROC0hA.1$tb)
+      cat("\n")
+      cat(ROC0hA.1$cutoff, " was used for the performance. sensitivity is ", ROC0hA.1$sen, " specificity is ", ROC0hA.1$spec, ".\n\n",
+          "Note, The number of the variants are the actual variants in the  table.",  ROC0hA.1$n, "\n\n")
+      }else{
+        ROC0hA.1 <- list(n=NA, cutoff = NA, auc = NA, sen = NA, spec = NA, tb = NA)
+      }
+      names(ROC0hA.1) <- paste0(names(ROC0hA.1), score)
+      ROC0h.1 <- c(ROC0h.1, ROC0hA.1)
+    }
+  }
+}
+```
+
+```{r mms, echo = FALSE, results = 'asis', fig.width= 5, fig.height=5}
+## since not all Exon has HDR two categories we will customize the report here
+## 
+
+mm0 <- list()
+
+for(score in c("A", "B", "C", "D")){
+  cat("#### Mixture model on D14_lib single variant functional score", score, "\n")
+  
+  cat("SNVs excluding splice region and variants on Chunling's list\n")
+  
+  mm0A <- mmfun(data = final1, scorecolumn = paste0("functional.score",score), typecolumn = "EventType", casen = "StopGain", controln = "Synonymous")
+  
+  cat("\n")
+  cat("There is",  ifelse(mm0A$error.occured, " AN ", " NO "), "Error Ocurred\n")
+  cat("\n")
+  cat(mm0A$f99, " was the functional score corresponding to the probability of non functional at 99% and" , mm0A$f1, " was the functional score corresponding to the probability of non functional at 1%.\n")
+  cat("\n")
+  cat(mm0A$f98, " was the functional score corresponding to the probability of non functional at 98% and" , mm0A$f2, " was the functional score corresponding to the probability of non functional at 2%.\n")
+
+  cat("If we use these two thresholds to classify the variants of synonymous, stopgain and missense. \n\n")
+  cat("\n")
+  cat("First, 1-99% cutoff\n")
+  cat("\n")
+  cat("Second, 2-98% cutoff\n")
+
+  cat("Note: Splice regions are included in Missense, not stopgain nor synonymous.\n")
+
+  cat("\n")
+  if(!mm0A$error.occured){
+    cn <- paste0("ctype", score); cn2 <- paste0("ctype", score,"2"); scorecolumn = paste0("functional.score",score)
+    final1 <- final1 %>% mutate(!!sym(cn) := ifelse(!!sym(scorecolumn) > mm0A$f1, "neutural", 
+                                                   ifelse(!!sym(scorecolumn) > mm0A$f99, "intermediate", "pathogenic"))) %>%
+      mutate(!!sym(cn2) := ifelse(!!sym(scorecolumn) > mm0A$f2, "neutural", 
+                                                   ifelse(!!sym(scorecolumn) > mm0A$f98, "intermediate", "pathogenic")))
+    
+    temp.check <- final1 %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G")) %>% filter((EventType %in% c("StopGain", "Synonymous") & spliceR == FALSE) | EventType == "Missense")
+      
+    print(table(truth = temp.check$EventType, pred = pull(temp.check, cn)))
+    cat("\n")
+    print(table(truth =  temp.check$EventType, pred = pull(temp.check, cn2)))
+    cat("\n")
+  }
+  names(mm0A) <- paste0(names(mm0A), score)
+  mm0 <- append(mm0, mm0A)
+  
+}
+
+mm1 <- list()
+
+for(score in c("A", "B", "C", "D")){
+  cat("\n")
+  cat("#### Mixture model on D14_D5 single variant functional score", score, "\n")
+  
+  cat("SNVs excluding splice region and variants on Chunling's list\n")
+  cat("\n")
+  mm0A <- mmfun(data = final1, scorecolumn = paste0("functional.score",score), typecolumn = "EventType", casen = "StopGain", controln = "Synonymous")
+  cat("\n")
+  cat("There is",  ifelse(mm0A$error.occured, " AN ", " NO "), "Error Ocurred\n")
+  cat("\n")
+  cat(mm0A$f99, " was the functional score corresponding to the probability of non functional at 99% and" , mm0A$f1, " was the functional score corresponding to the probability of non functional at 1%.\n")
+  cat("\n")
+  cat(mm0A$f98, " was the functional score corresponding to the probability of non functional at 98% and" , mm0A$f2, " was the functional score corresponding to the probability of non functional at 2%.\n")
+  cat("\n")
+  cat("If we use these two thresholds to classify the variants of synonymous, stopgain and missense. \n\n")
+
+  cat("First, 1-99% cutoff\n")
+  cat("\n")
+  cat("Second, 2-98% cutoff\n")
+  cat("\n")
+  cat("Note: Splice regions are included in Missense, not stopgain nor synonymous.\n")
+  cat("\n")
+  if(!mm0A$error.occured){
+    cn <- paste0("ctype", score); cn2 <- paste0("ctype", score,"2"); scorecolumn = paste0("functional.score",score)
+    final2 <- final2 %>% mutate(!!sym(cn) := ifelse(!!sym(scorecolumn) > mm0A$f1, "neutural", 
+                                                   ifelse(!!sym(scorecolumn) > mm0A$f99, "intermediate", "pathogenic"))) %>%
+      mutate(!!sym(cn2) := ifelse(!!sym(scorecolumn) > mm0A$f2, "neutural", 
+                                                   ifelse(!!sym(scorecolumn) > mm0A$f98, "intermediate", "pathogenic")))
+    
+    temp.check <- final2 %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G")) %>% filter((EventType %in% c("StopGain", "Synonymous") & spliceR == FALSE) | EventType == "Missense")
+      
+    print(table(truth = temp.check$EventType, pred = pull(temp.check, cn)))
+    cat("\n")
+    print(table(truth =  temp.check$EventType, pred = pull(temp.check, cn2)))
+    cat("\n")
+  }
+  names(mm0A) <- paste0(names(mm0A), score)
+  mm0 <- append(mm0, mm0A)
+  
+}
+
+```
+
+
+
+```{r}
+## output files. 
+write.csv(final1, paste0(params$Output_dir, Gene, "_", Exn, "_", vset, "_", loessSubset, "_", EventCount_Filter,  "_D14vLib.csv"), row.names = FALSE)
+write.csv(final2, paste0(params$Output_dir, Gene, "_", Exn, "_", vset, "_", loessSubset, "_", EventCount_Filter, "_ladjt_", ladjt, "_D14vD5.csv"), row.names = FALSE)
+
+## output the metrics in one file
+## 5 scores
+final1.snv <- final1 %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G"))
+final2.snv <- final2 %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G"))
+if(!is.null(params$HDRfile)){
+  if(length(unique(dt$htype))>1){
+    nhdr = c(NA, ROC0h$nA, ROC0h$nB, ROC0h$nC, ROC0h$nD)
+    auchdr = c(NA, ROC0h$aucA, ROC0h$aucB, ROC0h$aucC, ROC0h$aucD)
+    senshdr = c(NA, ROC0h$senA, ROC0h$senB, ROC0h$senC, ROC0h$senD)
+    spechdr = c(NA, ROC0h$specA, ROC0h$specB, ROC0h$specC, ROC0h$specD)
+    mihdr = c(NA, sum(ROC0h$tbA) -  ifelse(is.na(sum(ROC0h$tbA)), NA, sum(diag(ROC0h$tbA))),
+              sum(ROC0h$tbB) - ifelse(is.na(sum(ROC0h$tbB)), NA, sum(diag(ROC0h$tbB))), 
+              sum(ROC0h$tbC) - ifelse(is.na(sum(ROC0h$tbC)), NA, sum(diag(ROC0h$tbC))), 
+              sum(ROC0h$tbD) - ifelse(is.na(sum(ROC0h$tbD)), NA, sum(diag(ROC0h$tbD))))
+    cmhdr = c("",  ifelse(is.na(sum(ROC0h$tbA)), NA,paste(as.vector((c(ROC0h$tbA[1,], ROC0h$tbA[2,]))), collapse = " ")),
+                 ifelse(is.na(sum(ROC0h$tbB)), NA,paste(as.vector((c(ROC0h$tbB[1,], ROC0h$tbB[2,]))), collapse = " ")),
+                 ifelse(is.na(sum(ROC0h$tbC)), NA,paste(as.vector((c(ROC0h$tbC[1,], ROC0h$tbC[2,]))), collapse = " ")),
+                ifelse(is.na(sum(ROC0h$tbD)), NA, paste(as.vector((c(ROC0h$tbD[1,], ROC0h$tbD[2,]))), collapse = " ")))
+  }
+}else{
+    nhdr = rep(NA, 5)
+    auchdr = rep(NA, 5)
+    senshdr = rep(NA, 5)
+    spechdr = rep(NA, 5)
+    mihdr = rep(NA, 5)
+    cmhdr = rep("",5)
+  
+}
+
+metrics <- data.frame(Exon = rep(Exn,5),
+                      Ratio = rep("D14_lib", 5),
+                      loess = rep("Yes", 5),
+                      Rrep	= rep(length(filenames),5), 
+                      N_allv_score=c(length(filenames)*nrow(final1), sum(!is.na(final1$functional.scoreA)), sum(!is.na(final1$functional.scoreB)), sum(!is.na(final1$functional.scoreC)), sum(!is.na(final1$functional.scoreD))),
+                      N_SNV_score=c(length(filenames)*nrow(final1.snv), sum(!is.na(final1.snv$functional.scoreA)), sum(!is.na(final1.snv$functional.scoreB)), sum(!is.na(final1.snv$functional.scoreC)), sum(!is.na(final1.snv$functional.scoreD))),
+                      EvenFilter = rep(EventCount_Filter, 5),
+                      vSet = rep(vset, 5),
+                      Method = rep(loessSubset, 5),
+                      score = c("pre-FS", "single variant FS A", "single variant FS B", "single variant FS C", "single variant FS D"),
+                      AUC= c(as.numeric(ROC0$auc),as.numeric(ROCs0$aucA),as.numeric(ROCs0$aucB),as.numeric(ROCs0$aucC),as.numeric(ROCs0$aucD)),
+                      sens=c(ROC0$sen, ROCs0$senA, ROCs0$senB, ROCs0$senC, ROCs0$senD),
+                      spec=c(ROC0$spec, ROCs0$specA, ROCs0$specB, ROCs0$specC, ROCs0$specD),
+                      miscall=c(sum(ROC0$tb) - sum(diag(ROC0$tb)), sum(ROCs0$tbA) - sum(diag(ROCs0$tbA)), sum(ROCs0$tbB) - sum(diag(ROCs0$tbB)), sum(ROCs0$tbC) - sum(diag(ROCs0$tbC)), sum(ROCs0$tbD) - sum(diag(ROCs0$tbD))),
+                      confusion.matrix = c(paste(as.vector((c(ROC0$tb[1,], ROC0$tb[2,]))), collapse = " "),
+                                                   paste(as.vector((c(ROCs0$tbA[1,], ROCs0$tbA[2,]))), collapse = " "),
+                                                   paste(as.vector((c(ROCs0$tbB[1,], ROCs0$tbB[2,]))), collapse = " "),
+                                                   paste(as.vector((c(ROCs0$tbC[1,], ROCs0$tbC[2,]))), collapse = " "),
+                                                   paste(as.vector((c(ROCs0$tbD[1,], ROCs0$tbD[2,]))), collapse = " ")),
+                      N_HDR = nhdr,
+                      AUC_HDR= auchdr,
+                      sens_HDR=senshdr,
+                      spec_HDR=spechdr,
+                      miscall_HDR=mihdr,
+                      confusion.matrix_HDR = cmhdr
+                      )
+write.csv(metrics, paste0(params$Output_dir, Gene, "_", Exn, "_", vset, "_", loessSubset, "_", EventCount_Filter, "_D14_lib_", "_metrics.csv"), row.names = FALSE)
+
+## D14_D5
+if(!is.null(params$HDRfile)){
+  if(length(unique(dt2$htype))>1){
+    nhdr = c(NA, ROC0h.1$nA, ROC0h.1$nB, ROC0h.1$nC, ROC0h.1$nD)
+    auchdr = c(NA, ROC0h.1$aucA, ROC0h.1$aucB, ROC0h.1$aucC, ROC0h.1$aucD)
+    senshdr = c(NA, ROC0h.1$senA, ROC0h.1$senB, ROC0h.1$senC, ROC0h.1$senD)
+    spechdr = c(NA, ROC0h.1$specA, ROC0h.1$specB, ROC0h.1$specC, ROC0h.1$specD)
+    mihdr = c(NA, sum(ROC0h.1$tbA) -  ifelse(is.na(sum(ROC0h.1$tbA)), NA,sum(diag(ROC0h.1$tbA))),
+              sum(ROC0h.1$tbB) - ifelse(is.na(sum(ROC0h.1$tbB)), NA, sum(diag(ROC0h.1$tbB))), 
+              sum(ROC0h.1$tbC) - ifelse(is.na(sum(ROC0h.1$tbC)), NA, sum(diag(ROC0h.1$tbC))), 
+              sum(ROC0h.1$tbD) - ifelse(is.na(sum(ROC0h.1$tbD)), NA, sum(diag(ROC0h.1$tbD))))
+    cmhdr = c("",  ifelse(is.na(sum(ROC0h.1$tbA)), NA,paste(as.vector((c(ROC0h.1$tbA[1,], ROC0h.1$tbA[2,]))), collapse = " ")),
+                 ifelse(is.na(sum(ROC0h.1$tbB)), NA,paste(as.vector((c(ROC0h.1$tbB[1,], ROC0h.1$tbB[2,]))), collapse = " ")),
+                 ifelse(is.na(sum(ROC0h.1$tbC)), NA,paste(as.vector((c(ROC0h.1$tbC[1,], ROC0h.1$tbC[2,]))), collapse = " ")),
+                ifelse(is.na(sum(ROC0h.1$tbD)), NA, paste(as.vector((c(ROC0h.1$tbD[1,], ROC0h.1$tbD[2,]))), collapse = " ")))
+  }else{
+  
+  nhdr = rep(NA, 5)
+  auchdr = rep(NA, 5)
+  senshdr = rep(NA, 5)
+  spechdr = rep(NA, 5)
+  mihdr = rep(NA, 5)
+  cmhdr = rep("",5)
+  }
+}                     
+
+metrics <- data.frame(Exon = rep(Exn,5),
+                      Ratio = rep("D14_D5", 5),
+                      loess = rep(ladjt, 5),
+                      Rrep	= rep(length(filenames),5), 
+                      N_allv_score=c(length(filenames)*nrow(final2), sum(!is.na(final2$functional.scoreA)), sum(!is.na(final2$functional.scoreB)), sum(!is.na(final2$functional.scoreC)), sum(!is.na(final2$functional.scoreD))),
+                      N_SNV_score=c(length(filenames)*nrow(final2.snv), sum(!is.na(final2.snv$functional.scoreA)), sum(!is.na(final2.snv$functional.scoreB)), sum(!is.na(final2.snv$functional.scoreC)), sum(!is.na(final2.snv$functional.scoreD))),
+                      EvenFilter = rep(EventCount_Filter, 5),
+                      vSet = rep(vset, 5),
+                      Method = rep(loessSubset, 5),
+                      score = c("pre-FS", "single variant FS A", "single variant FS B", "single variant FS C", "single variant FS D"),
+                      AUC=c(as.numeric(ROC0.1$auc),as.numeric(ROCs0.1$aucA),as.numeric(ROCs0.1$aucB),as.numeric(ROCs0.1$aucC),as.numeric(ROCs0.1$aucD)),
+                      sens=c(ROC0.1$sen, ROCs0.1$senA, ROCs0.1$senB, ROCs0.1$senC, ROCs0.1$senD),
+                      spec=c(ROC0.1$spec, ROCs0.1$specA, ROCs0.1$specB, ROCs0.1$specC, ROCs0.1$specD),
+                      miscall= c(sum(ROC0.1$tb) - sum(diag(ROC0.1$tb)), sum(ROCs0.1$tbA) - sum(diag(ROCs0.1$tbA)), sum(ROCs0.1$tbB) - sum(diag(ROCs0.1$tbB)), sum(ROCs0.1$tbC) - sum(diag(ROCs0.1$tbC)), sum(ROCs0.1$tbD) - sum(diag(ROCs0.1$tbD))),
+                      confusion.matrix=c(paste(as.vector((c(ROC0.1$tb[1,], ROC0.1$tb[2,]))), collapse = " "),
+                                                paste(as.vector((c(ROCs0.1$tbA[1,], ROCs0.1$tbA[2,]))), collapse = " "),
+                                                paste(as.vector((c(ROCs0.1$tbB[1,], ROCs0.1$tbB[2,]))), collapse = " "),
+                                                paste(as.vector((c(ROCs0.1$tbC[1,], ROCs0.1$tbC[2,]))), collapse = " "),
+                                                paste(as.vector((c(ROCs0.1$tbD[1,], ROCs0.1$tbD[2,]))), collapse = " ")),
+                      N_HDR = nhdr,
+                      AUC_HDR= auchdr,
+                      sens_HDR=senshdr,
+                      spec_HDR=spechdr,
+                      miscall_HDR=mihdr,
+                      confusion.matrix_HDR = cmhdr)
+
+write.csv(metrics, paste0(params$Output_dir, Gene, "_", Exn, "_", vset, "_", loessSubset, "_", EventCount_Filter, "_ladjt_", ladjt, "_D14_D5_metrics.csv"), row.names = FALSE)
+evalthis <- (length(filenames)>1 & length(filenames)<4)
+```
+
+### G. Scatter plot for replicates only
+
+No plots will be generated for less than 2 or more than 3 replicates. 
+
+SNVs StopGain and Synomymous, and Missense (including splice region variants). 
+
+#### D14_Lib
+
+```{r, eval = evalthis, include = TRUE}
+test3 <- final1 %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G")) %>% filter(EventType %in% c("Missense", "Synonymous",  "StopGain")) %>% select(EventType, any_of(Rcol))
+
+test3 <- test3[complete.cases(test3),]
+etype <- unique(test3$EventType)
+mycol3 <- c( "green",  "red", "blue")
+check <- mycol3[match(test3$EventType, etype)]
+
+##scatterplot3js(x = test3$R1, y = test3$R2, z = test3$R3,  color= check, size = 0.2, axisLabels=c("R1", "R2", "R3"))
+if(length(filenames) == 2){
+  fig <- plot_ly(test3, x = ~R1, y = ~R2, color = ~EventType, colors = mycol3, size = 0.5)
+} 
+
+if(length(filenames) == 3){
+  fig <- plot_ly(test3, x = ~R1, y = ~R2, z = ~R3, color = ~EventType, colors = mycol3, size = 0.5)
+}
+
+
+```
+
+
+#### D14_D5
+
+```{r, eval = evalthis, include = TRUE}
+
+test3 <- final2 %>% filter(REF %in% c("A", "T", "C", "G") & ALT %in% c("A", "T", "C", "G")) %>% filter(EventType %in% c("Missense", "Synonymous",  "StopGain"))  %>% select(EventType, any_of(Rcol))
+
+test3 <- test3[complete.cases(test3),]
+etype <- unique(test3$EventType)
+mycol3 <- c( "green",  "red", "blue")
+check <- mycol3[match(test3$EventType, etype)]
+
+if(length(filenames) == 2){
+  fig <- plot_ly(test3, x = ~R1, y = ~R2, color = ~EventType, colors = mycol3, size = 0.5)
+} 
+
+if(length(filenames) == 3){
+  fig <- plot_ly(test3, x = ~R1, y = ~R2, z = ~R3, color = ~EventType, colors = mycol3, size = 0.5)
+}
+
+
+```

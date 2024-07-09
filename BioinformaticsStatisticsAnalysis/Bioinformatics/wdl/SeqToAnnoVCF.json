@@ -1,0 +1,16 @@
+{
+  "SeqToAnno.CHR": "",
+  "SeqToAnno.START": "",
+  "SeqToAnno.SEQ": "",
+  "SeqToAnno.AllPossibleScript": "~/python/AllPossible.py",
+  "SeqToAnno.SpliceaiScript": "~/spliceai/1.3.1/bin/spliceai",
+  "SeqToAnno.CavaScript": "~/CAVA/bin/CAVA.py",
+  "SeqToAnno.PROFILE": "~/config/PKG_PROFILE_CAVA",
+  "SeqToAnno.ReferenceGenome": "~/GRCh38_full_analysis_set_plus_decoy_hla.fa",
+  "SeqToAnno.SpliceaiEnvProfile": "~/spliceai/1.3.1/PKG_PROFILE",
+  "SeqToAnno.SAMPLENAME": "",
+  "SeqToAnno.CavaConfig": "~/cava_config.txt",
+  "SeqToAnno.CAVA_PYTHON": "~/python_virtual/bin/python",   
+  "SeqToAnno.SpliceaiParseScript": "~/python/spliceAI_parse.py"
+}
+
