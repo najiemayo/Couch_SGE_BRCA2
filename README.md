@@ -21,8 +21,8 @@ This package is supported for *Linux*, but in principle should be able to run on
 + Linux: Red Hat Enterprise Linux 8.8
 + Windows: Windows 10 Enterprise
 
-### R package Dependencies
-`VarCall` mainly depends on the following packages.
+### Package Dependencies
+`VarCall` mainly depends on JAGS and the following R packages.
 
 ```
 knitr, rjags, R2WinBUGS, R2jags, mgcv
@@ -34,8 +34,9 @@ knitr, rjags, R2WinBUGS, R2jags, mgcv
 git clone https://github.com/najiemayo/Couch_SGE_BRCA2
 ```
 
-### Install R packages
-Within R, type the following:
+### Install packages
+First install JAGS in the system following the link here: https://mcmc-jags.sourceforge.io/
+Then within R, type the following:
 ```
 install.packages(c("knitr", "rjags", "R2WinBUGS", "R2jags", "mgcv"))
 ```
@@ -53,6 +54,9 @@ This should be done within one miniute.
   - Within file BRCA2mave24.ldaER.Rtex, change data set name by changing the line `% db<-"uvCounts"` to `% db<-"uvCountsFnl"`, and increase the MCMC iterations by changing 'mcmc.pars<-list(iter=10000, burn=5000, thin=10) to `mcmc.pars<-list(iter=150000, burn=50000, thin=10)`   
   - Start R by type R in the command line
   - Within R, type the following `library(knitr); knit("BRCA2mave24.ldaER.Rtex")`
+    
+- Specified prior:
+  - Currently the prior is set to a mean value of 0.2 using a beta distribution Beta(2, 8). The change the prior, modifiy the line `beta.a<-2.0` and `beta.b<-8.0`. 
 
 - Expected output and running time.
 The output files will be `BRCA2mave24.ldaER.tex`, `MAVEpostProbs.csv` and several pdf plots. File `BRCA2mave24.ldaER.tex` and the plots can be further compiled into a pdf file. File `MAVEpostProbs.csv` is the main output file for predicted probabilities of being pathogenic based on the training labels from file `variant_type_for_train.csv`. The following shows the main columns of output:
