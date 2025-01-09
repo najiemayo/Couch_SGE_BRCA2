@@ -49,7 +49,7 @@ This should be done within one miniute.
   - Within R, type the following `library(knitr); knit("BRCA2mave24.ldaER.Rtex")`
 
 - To run on the full data set:
-  - Download the full data file `combined.raw.tsv` from GSE270424 and put it in the VarCall folder
+  - Download the full data file `combined.raw.tsv` from GSE270424 (https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE270424) and put it in the VarCall folder
   - Make sure the subfolder cache and figs are empty
   - Within file BRCA2mave24.ldaER.Rtex, change data set name by changing the line `% db<-"uvCounts"` to `% db<-"uvCountsFnl"`, and increase the MCMC iterations by changing 'mcmc.pars<-list(iter=10000, burn=5000, thin=10) to `mcmc.pars<-list(iter=150000, burn=50000, thin=10)`   
   - Start R by type R in the command line
